@@ -5,7 +5,7 @@ import { cookies, headers } from "next/headers";
 import { count, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { sessions, users } from "@/db/schema";
-import { ensureSeed } from "@/lib/seed";
+import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import {
   decodeSessionCookie,
   isSsoMode,
@@ -28,7 +28,7 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  await ensureSeed();
+  await ensureWorkspaceBootstrap();
   const [pending] = await db
     .select({ n: count() })
     .from(sessions)

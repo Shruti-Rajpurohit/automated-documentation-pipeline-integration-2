@@ -5,6 +5,7 @@ import {
   jsonb,
   timestamp,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
@@ -31,19 +32,29 @@ export const toneProfiles = pgTable("tone_profiles", {
     .defaultNow(),
 });
 
-export const products = pgTable("products", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  slug: text("slug").notNull(),
-  tagline: text("tagline").notNull().default(""),
-  repoUrl: text("repo_url").notNull().default(""),
-  docsRoot: text("docs_root").notNull().default("docs"),
-  docsRepoUrl: text("docs_repo_url").notNull().default(""),
-  toneProfileId: text("tone_profile_id"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const products = pgTable(
+  "products",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    tagline: text("tagline").notNull().default(""),
+    sourceRepoUrl: text("source_repo_url").notNull().default(""),
+    sourceRepoPath: text("source_repo_path").notNull().default(""),
+    docsRepoUrl: text("docs_repo_url").notNull().default(""),
+    docsRepoPath: text("docs_repo_path").notNull().default(""),
+    docsRoot: text("docs_root").notNull().default(""),
+    defaultBranch: text("default_branch").notNull().default("main"),
+    publishMode: text("publish_mode").notNull().default("github_pr"),
+    defaultProvider: text("default_provider").notNull().default("local"),
+    defaultModel: text("default_model").notNull().default("docline-local-1"),
+    toneProfileId: text("tone_profile_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("products_slug_unique").on(t.slug)]
+);
 
 export const documents = pgTable(
   "documents",
@@ -53,6 +64,7 @@ export const documents = pgTable(
     path: text("path").notNull(),
     title: text("title").notNull(),
     format: text("format").notNull().default("md"),
+    docKind: text("doc_kind").notNull().default("other"),
     content: text("content").notNull(),
     version: integer("version").notNull().default(1),
     updatedAt: timestamp("updated_at", { withTimezone: true })
@@ -62,7 +74,10 @@ export const documents = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("documents_product_idx").on(t.productId)]
+  (t) => [
+    index("documents_product_idx").on(t.productId),
+    uniqueIndex("documents_product_path_unique").on(t.productId, t.path),
+  ]
 );
 
 // A pipeline run that produced a reviewable proposal.
@@ -77,7 +92,7 @@ export const sessions = pgTable(
     baseRevision: text("base_revision").notNull(),
     headRevision: text("head_revision").notNull(),
     changeSummary: text("change_summary").notNull().default(""),
-    provider: text("provider").notNull().default("local"), // local | openrouter
+    provider: text("provider").notNull().default("local"), // local | ollama | openrouter
     model: text("model").notNull().default("docline-local-1"),
     diffText: text("diff_text").notNull().default(""),
     proposal: jsonb("proposal").$type<Record<string, unknown>>(),
@@ -113,6 +128,7 @@ export const documentEdits = pgTable(
     beforeContent: text("before_content").notNull(),
     afterContent: text("after_content").notNull(),
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+    action: text("action").notNull().default("replace"),
     docVersion: integer("doc_version").notNull(), // snapshot at proposal time
     editedById: text("edited_by_id"),
     createdAt: timestamp("created_at", { withTimezone: true })

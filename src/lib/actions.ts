@@ -21,7 +21,8 @@ import {
   type Proposal,
   type ToneProfileLite,
 } from "@/lib/pipeline/engine";
-import { tryOpenRouter } from "@/lib/pipeline/llm";
+import { tryOllama, tryOpenRouter } from "@/lib/pipeline/llm";
+import { publishLocalFiles } from "@/lib/pipeline/local-publisher";
 import type { Actor } from "@/lib/identity";
 
 export const uid = () => crypto.randomUUID();
@@ -132,9 +133,9 @@ export async function runPipeline(
   let proposal: Proposal | null = null;
   let providerNote: string | null = null;
   const incompleteInput = Boolean(input.truncated || parseLimit);
-  if (input.provider === "openrouter" && !incompleteInput) {
+  if ((input.provider === "openrouter" || input.provider === "ollama") && !incompleteInput) {
     const retrieved = retrieveSections(docs, signals).map((r) => r.section);
-    proposal = await tryOpenRouter({
+    const modelInput = {
       model: input.model,
       productName: product.name,
       changeSummary: input.changeSummary,
@@ -143,8 +144,11 @@ export async function runPipeline(
       docs,
       sections: retrieved,
       signals,
-    });
-    if (!proposal) providerNote = "openrouter_unavailable_or_invalid_fell_back_to_local";
+    };
+    proposal = input.provider === "ollama"
+      ? await tryOllama(modelInput)
+      : await tryOpenRouter(modelInput);
+    if (!proposal) providerNote = `${input.provider}_unavailable_or_invalid_fell_back_to_local`;
   }
   if (!proposal) {
     proposal = buildProposal({ docs, files, signals, tone });
@@ -215,6 +219,7 @@ export async function runPipeline(
         sectionHeading: e.sectionHeading,
         beforeContent: e.before,
         afterContent: e.after,
+        action: e.action,
         evidence: e.evidence,
         docVersion: e.docVersion,
       });
@@ -334,7 +339,11 @@ export async function decide(input: {
     if (!session) return { ok: false, error: "Session not found." };
     if (session.status !== "AWAITING_REVIEW")
       return { ok: false, error: `Cannot approve from state ${session.status}.` };
-    if (session.createdById && session.createdById === actor.id)
+    if (
+      process.env.ENFORCE_SEPARATION_OF_DUTIES === "true" &&
+      session.createdById &&
+      session.createdById === actor.id
+    )
       return { ok: false, error: "Separation of duties: you cannot approve your own run." };
     const editsNow = await db
       .select({ afterContent: documentEdits.afterContent })
@@ -384,18 +393,11 @@ export async function decide(input: {
     return { ok: true };
   }
 
-  const publishDestination =
-    process.env.PUBLISH_DESTINATION ?? (process.env.NODE_ENV === "production" ? "github_pr" : "database");
-  if (publishDestination !== "github_pr" && publishDestination !== "database") {
-    return { ok: false, error: "PUBLISH_DESTINATION must be github_pr or database." };
-  }
-  if (process.env.NODE_ENV === "production" && publishDestination !== "github_pr") {
-    return { ok: false, error: "Production publishing must use GitHub pull requests." };
-  }
-
-  // The GitHub PR path is idempotent by session branch; database publishing
-  // remains available for local/demo deployments.
   const actorIdRef = { current: actor.id };
+  const localPublish: {
+    rollback?: () => Promise<void>;
+    commit?: () => Promise<void>;
+  } = {};
   try {
     await db.transaction(async (tx) => {
       const [session] = await tx
@@ -409,10 +411,32 @@ export async function decide(input: {
           reason: "bad_state",
           status: session.status,
         });
-      if (session.createdById && session.createdById === actorIdRef.current)
+      if (
+        process.env.ENFORCE_SEPARATION_OF_DUTIES === "true" &&
+        session.createdById &&
+        session.createdById === actorIdRef.current
+      )
         throw new PublishBlocked("Separation of duties: you cannot publish your own run.", {
           reason: "self_publish",
         });
+      const [product] = await tx.select().from(products).where(eq(products.id, session.productId));
+      if (!product) throw new PublishBlocked("Product configuration is missing.", { reason: "missing_product" });
+      const publishDestination = product.publishMode || "database";
+      if (!["github_pr", "local_disk", "database"].includes(publishDestination)) {
+        throw new PublishBlocked("Configure publishMode as github_pr, local_disk, or database.", {
+          reason: "invalid_publish_mode",
+        });
+      }
+      if (publishDestination === "github_pr" && !product.docsRepoUrl && !product.sourceRepoUrl) {
+        throw new PublishBlocked("Configure a documentation or source GitHub URL for this product.", {
+          reason: "missing_docs_repository",
+        });
+      }
+      if (publishDestination === "local_disk" && !product.docsRepoPath && !product.sourceRepoPath) {
+        throw new PublishBlocked("Configure a documentation or source local checkout path before using local_disk publishing.", {
+          reason: "missing_docs_path",
+        });
+      }
 
       const edits = await tx
         .select()
@@ -466,13 +490,15 @@ export async function decide(input: {
             }
           );
         }
-        if (!docContent.get(doc.id)!.includes(edit.beforeContent)) {
+        if (edit.action !== "create" && !docContent.get(doc.id)!.includes(edit.beforeContent)) {
           throw new PublishBlocked(`${edit.docPath} no longer contains the reviewed section.`, {
             reason: "target_section_mismatch",
             docPath: edit.docPath,
           });
         }
-        const next = docContent.get(doc.id)!.replace(edit.beforeContent, () => edit.afterContent);
+        const next = edit.action === "create"
+          ? `${docContent.get(doc.id)!.replace(/\s*$/, "")}\n\n${edit.afterContent.trim()}\n`
+          : docContent.get(doc.id)!.replace(edit.beforeContent, () => edit.afterContent);
         docContent.set(doc.id, next);
         if (publishDestination === "database") {
           await tx
@@ -502,24 +528,10 @@ export async function decide(input: {
         });
 
       if (publishDestination === "github_pr") {
-        const [product] = await tx
-          .select({
-            name: products.name,
-            repoUrl: products.repoUrl,
-            docsRepoUrl: products.docsRepoUrl,
-            docsRoot: products.docsRoot,
-          })
-          .from(products)
-          .where(eq(products.id, session.productId));
-        if (!product) {
-          throw new PublishBlocked("Product configuration is missing.", {
-            reason: "missing_product",
-          });
-        }
         let pullRequest: { url: string; branch: string; baseBranch: string; merged: boolean };
         try {
           pullRequest = await createDocumentationPullRequest({
-            repoUrl: product.docsRepoUrl || product.repoUrl,
+            repoUrl: product.docsRepoUrl || product.sourceRepoUrl,
             docsRoot: product.docsRoot,
             sessionId: session.id,
             headRevision: session.headRevision,
@@ -566,6 +578,38 @@ export async function decide(input: {
           edits: edits.length,
           merged: pullRequest.merged,
         }, at, tx);
+      } else if (publishDestination === "local_disk") {
+        try {
+          const result = await publishLocalFiles({
+            repoPath: product.docsRepoPath || product.sourceRepoPath,
+            docsRoot: product.docsRoot,
+            files: [...docsToPublish.values()],
+          });
+          localPublish.rollback = result.rollback;
+          localPublish.commit = result.commit;
+          for (const [documentId, doc] of docsToPublish) {
+            await tx
+              .update(documents)
+              .set({ content: doc.afterContent, version: doc.version + 1, updatedAt: at })
+              .where(eq(documents.id, documentId));
+            await audit(session.id, actor.id, "DOC_PUBLISHED", {
+              docPath: doc.path,
+              fromVersion: doc.version,
+              toVersion: doc.version + 1,
+              source: "local_disk",
+            }, at, tx);
+          }
+          await tx
+            .update(sessions)
+            .set({ status: "PUBLISHED", publishedAt: at, updatedAt: at })
+            .where(eq(sessions.id, session.id));
+          await audit(session.id, actor.id, "PUBLISHED", { edits: edits.length, destination: "local_disk" }, at, tx);
+        } catch (error) {
+          throw new PublishBlocked(
+            error instanceof Error ? error.message : "Local disk publishing failed.",
+            { reason: "local_disk_publish_failed" }
+          );
+        }
       } else {
         await tx
           .update(sessions)
@@ -574,8 +618,17 @@ export async function decide(input: {
         await audit(session.id, actor.id, "PUBLISHED", { edits: edits.length }, at, tx);
       }
     });
+    if (localPublish.commit) {
+      localPublish.rollback = undefined;
+      await localPublish.commit();
+      localPublish.commit = undefined;
+    }
     return { ok: true };
   } catch (e) {
+    if (localPublish.rollback) {
+      await localPublish.rollback();
+      localPublish.rollback = undefined;
+    }
     if (e instanceof PublishBlocked) {
       // Persist the policy block OUTSIDE the rolled-back transaction.
       await audit(input.sessionId, actor.id, "POLICY_BLOCKED", e.auditDetail, at);

@@ -24,6 +24,7 @@ import { cx, fullTime, relativeTime } from "@/lib/time";
 
 export interface ConsoleEdit {
   id: string;
+  action: string;
   docPath: string;
   sectionHeading: string;
   before: string;
@@ -309,7 +310,7 @@ export function ReviewConsole({
                   <FileText size={14} className="text-mint" />
                   <span className="font-mono text-[12px] text-snow/90">{edit.docPath}</span>
                   <span className="rounded-full border border-hairline px-2 py-px text-[10.5px] text-fog">
-                    § {edit.sectionHeading}
+                    {edit.action} · § {edit.sectionHeading}
                   </span>
                   <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-fog">
                     {edit.evidence.map((ev) => (

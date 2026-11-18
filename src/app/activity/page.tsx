@@ -3,7 +3,7 @@ import { desc, eq } from "drizzle-orm";
 import { Bot } from "lucide-react";
 import { db } from "@/db";
 import { auditEvents, sessions, users } from "@/db/schema";
-import { ensureSeed } from "@/lib/seed";
+import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import { PageHeader } from "@/components/page-header";
 import { Avatar, Reveal, StatusChip } from "@/components/ui";
 import { relativeTime, fullTime } from "@/lib/time";
@@ -49,7 +49,7 @@ function detailChips(detail: Record<string, unknown>): string[] {
 }
 
 export default async function ActivityPage() {
-  await ensureSeed();
+  await ensureWorkspaceBootstrap();
 
   const rows = await db
     .select({

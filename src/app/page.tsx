@@ -3,7 +3,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { ArrowRight, ArrowUpRight } from "lucide-react";
 import { db } from "@/db";
 import { auditEvents, documentEdits, documents, products, sessions, users } from "@/db/schema";
-import { ensureSeed } from "@/lib/seed";
+import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import { PageHeader } from "@/components/page-header";
 import { PipelineFlow } from "@/components/pipeline-flow";
 import { Avatar, Counter, Reveal, StatusChip } from "@/components/ui";
@@ -12,7 +12,7 @@ import { relativeTime } from "@/lib/time";
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage() {
-  await ensureSeed();
+  await ensureWorkspaceBootstrap();
 
   const allSessions = await db
     .select({
@@ -117,7 +117,7 @@ export default async function OverviewPage() {
   return (
     <div>
       <PageHeader
-        kicker="nimbus systems · workspace"
+        kicker="workspace"
         title="Documentation that keeps up with the code."
         sub="Docline watches every release, drafts doc updates in your house voice with evidence links, and holds them for human sign-off before a single word ships."
         actions={
@@ -166,7 +166,11 @@ export default async function OverviewPage() {
               <div className="divide-y divide-hairline">
                 {awaiting.length === 0 && (
                   <p className="px-5 py-8 text-center text-[13px] text-fog">
-                    Queue is clear. The next release event will land here.
+                    {allProducts.length === 0 ? (
+                      <>No products configured yet. <Link className="text-mint underline" href="/products">Add your first product</Link> to get started.</>
+                    ) : (
+                      <>Queue is clear. Start a run when your next release is ready.</>
+                    )}
                   </p>
                 )}
                 {awaiting.map((s) => (

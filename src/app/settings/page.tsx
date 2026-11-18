@@ -21,9 +21,9 @@ export default function SettingsPage() {
   -H "content-type: application/json" \\
   -H "authorization: Bearer $PIPELINE_API_TOKEN" \\
   -d '{
-    "productId": "p-relay",
-    "baseRevision": "v2.4.0",
-    "headRevision": "v2.4.1",
+    "productId": "<configured-product-id>",
+    "baseRevision": "v1.0.0",
+    "headRevision": "v1.1.0",
     "changeSummary": "Describe the release in one paragraph.",
     "provider": "local",
     "model": "docline-local-1",
@@ -36,7 +36,7 @@ export default function SettingsPage() {
       <PageHeader
         kicker="workspace"
         title="Settings"
-        sub="Drafting engines, review policy, and integration surface."
+        sub="Drafting providers, review policy, and integration surface."
       />
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -44,7 +44,16 @@ export default function SettingsPage() {
           <div className="card h-full p-5">
             <div className="mb-4 flex items-center gap-2">
               <Cpu size={15} className="text-mint" />
-              <h2 className="text-[15px] font-semibold text-snow">Drafting engines</h2>
+              <h2 className="text-[15px] font-semibold text-snow">Drafting providers</h2>
+            </div>
+            <div className="flex items-start gap-2 rounded-xl border border-hairline bg-panel-2 px-4 py-3">
+              <Terminal size={14} className="mt-0.5 text-fog" />
+              <div>
+                <div className="text-[13px] font-medium text-snow">Ollama local models</div>
+                <p className="mt-0.5 max-w-sm text-[12px] leading-relaxed text-fog">
+                  Configure OLLAMA_URL on the server. Available models appear in the run form.
+                </p>
+              </div>
             </div>
             <div className="space-y-3">
               <div className="flex items-start justify-between gap-4 rounded-xl border border-hairline bg-panel-2 px-4 py-3">
@@ -146,7 +155,7 @@ export default function SettingsPage() {
               </div>
               <p className="text-[12px] leading-relaxed text-fog">
                 The FastAPI service in <span className="font-mono text-[10.5px]">backend/</span>{" "}
-                runs alongside this app (git-native repos on disk, SQLite, Ollama/OpenRouter
+                runs alongside this app (                git-native repos on disk, a separate SQLite review store, and Ollama/OpenRouter
                 drafting). This server is its trusted proxy: requests to{" "}
                 <code className="rounded bg-white/[0.05] px-1 py-px font-mono text-[10.5px] text-snow/80">
                   /api/backend/sessions

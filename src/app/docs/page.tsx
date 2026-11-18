@@ -1,13 +1,13 @@
 import { db } from "@/db";
 import { documents, products, toneProfiles } from "@/db/schema";
-import { ensureSeed } from "@/lib/seed";
+import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import { PageHeader } from "@/components/page-header";
 import { DocsBrowser } from "@/components/docs-browser";
 
 export const dynamic = "force-dynamic";
 
 export default async function DocsPage() {
-  await ensureSeed();
+  await ensureWorkspaceBootstrap();
   const [productRows, docRows, toneRows] = await Promise.all([
     db.select().from(products),
     db.select().from(documents),
@@ -30,6 +30,7 @@ export default async function DocsPage() {
             productId: d.productId,
             path: d.path,
             title: d.title,
+            docKind: d.docKind,
             content: d.content,
             version: d.version,
             updatedAt: d.updatedAt.toISOString(),

@@ -84,11 +84,10 @@ export async function createDocumentationPullRequest(input: {
   const root = input.docsRoot.replace(/^\/+|\/+$/g, "");
   for (const file of input.files) {
     if (
-      !root ||
       file.path.startsWith("/") ||
       file.path.includes("\\") ||
       file.path.split("/").includes("..") ||
-      !(file.path === root || file.path.startsWith(`${root}/`))
+      (root && file.path !== root && !file.path.startsWith(`${root}/`))
     ) {
       throw new Error(`Documentation path is outside the configured docs root: ${file.path}`);
     }

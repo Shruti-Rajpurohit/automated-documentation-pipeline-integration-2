@@ -30,14 +30,21 @@ function normalizeRepoRef(value: string): string {
  * matches `org/relay-docs`, and `_` is just a character.
  */
 function matchProductByRepo(
-  all: { id: string; name: string; repoUrl: string; docsRepoUrl?: string }[],
+  all: {
+    id: string;
+    name: string;
+    sourceRepoUrl: string;
+    docsRepoUrl?: string;
+    defaultProvider?: string;
+    defaultModel?: string;
+  }[],
   fullName: string,
   docsRepository = false
 ) {
   const target = fullName.toLowerCase();
   return all.find((p) => {
     const ref = normalizeRepoRef(
-      docsRepository ? p.docsRepoUrl || p.repoUrl : p.repoUrl
+      docsRepository ? p.docsRepoUrl || p.sourceRepoUrl : p.sourceRepoUrl
     );
     return ref === target || ref.endsWith(`/${target}`);
   });
@@ -209,7 +216,7 @@ export async function POST(req: Request) {
       .select({
         id: products.id,
         name: products.name,
-        repoUrl: products.repoUrl,
+        sourceRepoUrl: products.sourceRepoUrl,
         docsRepoUrl: products.docsRepoUrl,
       })
       .from(products);
@@ -270,11 +277,13 @@ export async function POST(req: Request) {
           };
           docsToUpdate.set(edit.documentId, current);
         }
-        if (!current.content.includes(edit.beforeContent)) {
+        if (edit.action !== "create" && !current.content.includes(edit.beforeContent)) {
           conflicts.push(edit.docPath);
           break;
         }
-        current.content = current.content.replace(edit.beforeContent, () => edit.afterContent);
+        current.content = edit.action === "create"
+          ? `${current.content.replace(/\s*$/, "")}\n\n${edit.afterContent.trim()}\n`
+          : current.content.replace(edit.beforeContent, () => edit.afterContent);
       }
 
       if (conflicts.length === 0) {
@@ -353,8 +362,10 @@ export async function POST(req: Request) {
     .select({
       id: products.id,
       name: products.name,
-      repoUrl: products.repoUrl,
+      sourceRepoUrl: products.sourceRepoUrl,
       docsRepoUrl: products.docsRepoUrl,
+      defaultProvider: products.defaultProvider,
+      defaultModel: products.defaultModel,
     })
     .from(products);
   const product = matchProductByRepo(all, fullName);
@@ -393,8 +404,11 @@ export async function POST(req: Request) {
   const deliveryId = req.headers.get("x-github-delivery") ?? `${fullName.toLowerCase()}:${afterTail}`;
   const changeSummary = headMessage ?? "";
   const title = `${product.name} ${branch}@${shortAfter}${headMessage ? ` — ${headMessage}` : ""}`;
-  const provider = process.env.DEFAULT_PROVIDER === "openrouter" ? "openrouter" : "local";
-  const model = process.env.DEFAULT_MODEL ?? "docline-local-1";
+  const configuredProvider = product.defaultProvider;
+  const provider = configuredProvider === "ollama" || configuredProvider === "openrouter"
+    ? configuredProvider
+    : "local";
+  const model = product.defaultModel || process.env.DEFAULT_MODEL || "docline-local-1";
   const dedupeKey = `github:${fullName.toLowerCase()}:${afterTail}`;
   const jobId = uid();
   await db.insert(pipelineJobs).values({

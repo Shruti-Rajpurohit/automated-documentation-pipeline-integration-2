@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.change_analyzer import ChangeAnalysis, analyze_change
 from app.document_finder import DocumentSection, find_candidate_sections
 from app.git_tools import GitDiff, collect_git_diff
-import os
 from app.llm_client import (
 	DocumentationProposal,
 	PromptSizeError,
@@ -29,9 +29,6 @@ CONTEXT_PATH = Path(__file__).resolve().parents[2] / "PROJECT_CONTEXT.md"
 _SOURCE_DIFF_MARKERS = ("diff --git ", "@@ ", "+++ ", "--- ")
 _IMPACT_DECISIONS = {"update_required", "no_update", "human_investigation"}
 _CLAIM_PATTERN = re.compile(r"`([^`]+)`")
-
-
-import os
 
 
 _NEUTRAL_CONTEXT = (
@@ -395,14 +392,6 @@ async def analyze_repository_change(
 				sections,
 				"Impact analysis was not a grounded JSON report (regeneration also failed); investigating manually.",
 			)
-	except ProposalValidationError as error:
-		return _human_investigation_draft(
-			source_diff,
-			analysis,
-			sections,
-			f"Impact analysis was not a grounded JSON report: {error}",
-			impact_report=raw_impact_report,
-		)
 	impact_report = json.dumps(impact_payload, ensure_ascii=False)
 	impact_decision = str(impact_payload["decision"])
 	if impact_decision != "update_required":

@@ -13,6 +13,7 @@ import {
   BookOpen,
   History,
   LayoutDashboard,
+  Package,
   Rocket,
   Settings2,
   ShieldCheck,
@@ -58,6 +59,7 @@ export const useRole = () => useContext(RoleContext);
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/runs/new", label: "New run", icon: Rocket },
+  { href: "/products", label: "Products", icon: Package },
   { href: "/docs", label: "Documentation", icon: BookOpen },
   { href: "/activity", label: "Activity", icon: History },
   { href: "/settings", label: "Settings", icon: Settings2 },

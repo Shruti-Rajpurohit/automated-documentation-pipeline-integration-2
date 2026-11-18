@@ -31,6 +31,7 @@ export interface DocSection {
 }
 
 export interface DraftEdit {
+  action: "replace" | "append" | "create";
   documentId: string;
   docPath: string;
   sectionHeading: string;
@@ -415,6 +416,7 @@ export function draftSectionEdit(
     .join("");
 
   return {
+    action: "append",
     documentId: section.documentId,
     docPath: section.docPath,
     sectionHeading: section.heading,
@@ -524,13 +526,23 @@ export function validateProposal(
         return `Edit target ${e.docPath} / ${e.sectionHeading} was not retrieved for this run.`;
       }
     }
-    if (!doc.content.includes(e.before))
-      return `Edit target in ${e.docPath} no longer matches the document.`;
-    // Uniqueness: replacing a repeated fragment would hit an arbitrary match.
-    if (doc.content.split(e.before).length - 1 !== 1)
-      return `Edit target in ${e.docPath} is not unique in the document.`;
-    if (!e.after.startsWith(e.before))
-      return `Edit in ${e.docPath} must preserve the original section text at the start of its replacement.`;
+    if (e.action === "create") {
+      if (e.before !== "") return `Create edit in ${e.docPath} must not replace existing prose.`;
+      if (allowedSections && !allowedSections.some((s) => s.docPath === e.docPath)) {
+        return `New section target ${e.docPath} was not retrieved for this run.`;
+      }
+      const heading = new RegExp(`^#{1,4}\\s+${escapeRe(e.sectionHeading)}\\s*$`, "m");
+      if (heading.test(doc.content)) return `Section ${e.sectionHeading} already exists in ${e.docPath}.`;
+      if (!heading.test(e.after)) return `Create edit for ${e.docPath} must start with its new section heading.`;
+    } else {
+      if (!doc.content.includes(e.before))
+        return `Edit target in ${e.docPath} no longer matches the document.`;
+      // Uniqueness: replacing a repeated fragment would hit an arbitrary match.
+      if (doc.content.split(e.before).length - 1 !== 1)
+        return `Edit target in ${e.docPath} is not unique in the document.`;
+      if (e.action === "append" && !e.after.startsWith(e.before))
+        return `Append edit in ${e.docPath} must preserve the original section text at the start.`;
+    }
     if (e.evidence.length === 0)
       return `Edit in ${e.docPath} cites no evidence.`;
     const badRef = e.evidence.find((ref) => !validRefs.has(ref));

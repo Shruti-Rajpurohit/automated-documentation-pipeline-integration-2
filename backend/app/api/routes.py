@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["review sessions"])
 Database = Annotated[AsyncSession, Depends(get_db)]
 Reader = Annotated[User, Depends(get_current_user)]
-Writer = Annotated[User, Depends(require_roles(UserRole.WRITER))]
+Writer = Annotated[User, Depends(require_roles(UserRole.WRITER, UserRole.REVIEWER, UserRole.APPROVER))]
 Editor = Annotated[User, Depends(require_roles(UserRole.WRITER, UserRole.REVIEWER))]
 Reviewer = Annotated[User, Depends(require_roles(UserRole.REVIEWER, UserRole.APPROVER))]
 Approver = Annotated[User, Depends(require_roles(UserRole.REVIEWER, UserRole.APPROVER))]

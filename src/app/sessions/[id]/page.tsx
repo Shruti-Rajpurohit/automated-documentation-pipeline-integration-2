@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { auditEvents, documentEdits, documents, products, sessions, users } from "@/db/schema";
-import { ensureSeed } from "@/lib/seed";
+import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import {
   ReviewConsole,
   type ConsoleAudit,
@@ -18,7 +18,7 @@ export default async function SessionPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  await ensureSeed();
+  await ensureWorkspaceBootstrap();
 
   const [row] = await db
     .select({ s: sessions, productName: products.name, productSlug: products.slug })
@@ -89,6 +89,7 @@ export default async function SessionPage({
 
   const consoleEdits: ConsoleEdit[] = editRows.map((e) => ({
     id: e.id,
+    action: e.action,
     docPath: e.docPath,
     sectionHeading: e.sectionHeading,
     before: e.beforeContent,

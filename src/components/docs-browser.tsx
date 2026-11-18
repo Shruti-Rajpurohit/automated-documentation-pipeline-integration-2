@@ -10,6 +10,7 @@ export interface DocRecord {
   productId: string;
   path: string;
   title: string;
+  docKind: string;
   content: string;
   version: number;
   updatedAt: string;
@@ -124,7 +125,7 @@ export function DocsBrowser({
               />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] font-medium text-snow">{d.title}</div>
-                <div className="truncate font-mono text-[10.5px] text-fog">{d.path}</div>
+                <div className="truncate font-mono text-[10.5px] text-fog">{d.path} · {d.docKind}</div>
               </div>
               <div className="text-right font-mono text-[10px] text-fog">
                 <div>v{d.version}</div>
