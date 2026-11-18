@@ -1,0 +1,87 @@
+# One command, whole product:  docker compose up --build
+#
+#   web :3000  ─ trusted proxy ─►  api :8000 (loopback-only publish)
+#     │                              │
+#  Postgres ◄── Drizzle          SQLite (volume: api-data)
+#  (loopback-only)
+#
+# The Python service and Postgres are never published beyond loopback: the
+# Next.js server is the only public surface and brokers identity to both.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: app_db
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - docline-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/documentation_pipeline.db
+      QUEUE_DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/app_db
+      APP_ENV: production
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?set AUTH_PROXY_SECRET in .env}
+      REPOSITORY_ROOTS: /srv/repos
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-ollama}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
+      WEBHOOK_USER_ID: ${WEBHOOK_USER_ID:-1}
+      OLLAMA_URL: ${OLLAMA_URL:-http://127.0.0.1:11434}
+      OLLAMA_URL_ALLOWLIST: ${OLLAMA_URL_ALLOWLIST:-}
+      SOURCE_REPO_PATH: ${SOURCE_REPO_PATH:-}
+      DOCS_REPO_PATH: ${DOCS_REPO_PATH:-}
+      PIPELINE_USE_GLOBAL_CONTEXT: ${PIPELINE_USE_GLOBAL_CONTEXT:-}
+      PIPELINE_MAX_PROMPT_CHARS: ${PIPELINE_MAX_PROMPT_CHARS:-200000}
+    volumes:
+      - api-data:/data
+      - ./repos:/srv/repos
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/app_db
+      PIPELINE_BACKEND_URL: http://api:8000
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?set AUTH_PROXY_SECRET in .env}
+      DOCLINE_SESSION_SECRET: ${DOCLINE_SESSION_SECRET:?set DOCLINE_SESSION_SECRET in .env}
+      DOCLINE_AUTH_MODE: ${DOCLINE_AUTH_MODE:-sso}
+      SSO_PROXY_SECRET: ${SSO_PROXY_SECRET:?set SSO_PROXY_SECRET in .env}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_API_BASE: ${GITHUB_API_BASE:-}
+      PIPELINE_API_TOKEN: ${PIPELINE_API_TOKEN:-}
+      PUBLISH_DESTINATION: ${PUBLISH_DESTINATION:-github_pr}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      DOCLINE_DEMO_MODE: ${DOCLINE_DEMO_MODE:-}
+      DOCLINE_SEED_DEMO: ${DOCLINE_SEED_DEMO:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  docline-pgdata:
+  api-data:

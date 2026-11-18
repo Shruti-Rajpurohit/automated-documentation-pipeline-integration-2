@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+import difflib
+import hashlib
+import shutil
+import os
+import re
+import tempfile
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import Iterable, Mapping
+
+from app.llm_client import DocumentEdit
+
+
+class PatchError(ValueError):
+	pass
+
+
+class StalePatchError(RuntimeError):
+	pass
+
+
+_DOCUMENTATION_EXTENSIONS = {".md", ".mdx", ".rst", ".adoc", ".asciidoc"}
+_HEADING_PATTERN = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
+@dataclass(frozen=True)
+class FilePatch:
+	path: str
+	original_sha256: str
+	before: str
+	after: str
+	unified_diff: str
+
+
+@dataclass(frozen=True)
+class PreparedPatch:
+	files: tuple[FilePatch, ...]
+
+
+def _normalized_sha256(raw: bytes) -> str:
+	"""Hashes are computed over newline-normalized text so CRLF checkouts
+	produce the same fingerprint as LF originals."""
+	text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+	return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def prepare_patch(repo_path: str | Path, edits: Iterable[DocumentEdit]) -> PreparedPatch:
+	root = Path(repo_path).resolve()
+	edit_list = list(edits)
+	if not edit_list:
+		raise PatchError("Cannot prepare a patch with no document edits")
+
+	original_files: dict[str, tuple[str, str]] = {}
+	for relative_path in sorted({edit.path for edit in edit_list}):
+		_validate_relative_path(relative_path)
+		path = root.joinpath(*PurePosixPath(relative_path).parts)
+		if path.is_symlink() or not path.is_file() or path.suffix.lower() not in _DOCUMENTATION_EXTENSIONS:
+			raise PatchError(f"Target is not an existing documentation file: {relative_path}")
+		try:
+			path.resolve(strict=True).relative_to(root)
+			before = path.read_text(encoding="utf-8")
+		except (OSError, UnicodeError, ValueError) as error:
+			raise PatchError(f"Unable to read documentation file: {relative_path}") from error
+		original_files[relative_path] = (
+			before,
+			_normalized_sha256(before.encode("utf-8")),
+		)
+
+	return prepare_patch_from_originals(original_files, edit_list)
+
+
+def prepare_patch_from_originals(
+	original_files: Mapping[str, tuple[str, str]],
+	edits: Iterable[DocumentEdit],
+) -> PreparedPatch:
+	grouped_edits: dict[str, list[DocumentEdit]] = {}
+	for edit in edits:
+		_validate_relative_path(edit.path)
+		grouped_edits.setdefault(edit.path, []).append(edit)
+	if not grouped_edits:
+		raise PatchError("Cannot prepare a patch with no document edits")
+
+	file_patches: list[FilePatch] = []
+	for relative_path, file_edits in sorted(grouped_edits.items()):
+		if relative_path not in original_files:
+			raise PatchError(f"Original review snapshot is missing: {relative_path}")
+		if PurePosixPath(relative_path).suffix.lower() not in _DOCUMENTATION_EXTENSIONS:
+			raise PatchError(f"Target is not a documentation file: {relative_path}")
+		before, original_sha256 = original_files[relative_path]
+		if _normalized_sha256(before.encode("utf-8")) != original_sha256:
+			raise PatchError(f"Original review snapshot hash does not match: {relative_path}")
+		after = before
+		seen_sections: set[str] = set()
+		for edit in file_edits:
+			if edit.section in seen_sections:
+				raise PatchError(f"Multiple edits target the same section: {relative_path} / {edit.section}")
+			if edit.action not in {"replace", "append", "create"}:
+				raise PatchError(f"Unsupported document edit action: {edit.action}")
+			seen_sections.add(edit.section)
+			after = _apply_edit(after, relative_path, edit)
+
+		diff = "".join(
+			difflib.unified_diff(
+				before.splitlines(keepends=True),
+				after.splitlines(keepends=True),
+				fromfile=relative_path,
+				tofile=relative_path,
+			)
+		)
+		file_patches.append(
+			FilePatch(
+				path=relative_path,
+				original_sha256=original_sha256,
+				before=before,
+				after=after,
+				unified_diff=diff,
+			)
+		)
+
+	return PreparedPatch(files=tuple(file_patches))
+
+
+def apply_approved_patch(
+	repo_path: str | Path,
+	prepared_patch: PreparedPatch,
+	*,
+	approved: bool = False,
+) -> None:
+	if not approved:
+		raise PatchError("Human approval is required before applying documentation changes")
+
+	root = Path(repo_path).resolve()
+	targets: list[tuple[Path, FilePatch]] = []
+	for file_patch in prepared_patch.files:
+		_validate_relative_path(file_patch.path)
+		path = root.joinpath(*PurePosixPath(file_patch.path).parts)
+		if path.is_symlink() or not path.is_file():
+			raise StalePatchError(f"Patch target is no longer a regular file: {file_patch.path}")
+		try:
+			path.resolve(strict=True).relative_to(root)
+			current = path.read_bytes()
+		except (OSError, ValueError) as error:
+			raise StalePatchError(f"Patch target is no longer available: {file_patch.path}") from error
+		if _normalized_sha256(current) != file_patch.original_sha256:
+			raise StalePatchError(f"Patch target changed after review: {file_patch.path}")
+		targets.append((path, file_patch))
+
+	# Write-then-swap with per-file backups: a failure partway through a
+	# multi-file apply restores every original instead of leaving the docs
+	# tree half-written.
+	temporary_paths: list[Path] = []
+	backup_paths: list[Path] = []
+	replaced: list[Path] = []
+	try:
+		for path, file_patch in targets:
+			with tempfile.NamedTemporaryFile(
+				mode="w",
+				encoding="utf-8",
+				dir=path.parent,
+				prefix=f".{path.name}.",
+				suffix=".tmp",
+				delete=False,
+			) as temporary_file:
+				temporary_file.write(file_patch.after)
+				temporary_file.flush()
+				os.fsync(temporary_file.fileno())
+				temporary_paths.append(Path(temporary_file.name))
+			backup = path.with_name(f".{path.name}.pipeline-backup")
+			shutil.copy2(path, backup)
+			backup_paths.append(backup)
+		try:
+			for temporary_path, (path, _) in zip(temporary_paths, targets):
+				os.replace(temporary_path, path)
+				replaced.append(path)
+		except OSError:
+			for path in replaced:
+				backup = path.with_name(f".{path.name}.pipeline-backup")
+				if backup.exists():
+					shutil.copy2(backup, path)
+			raise
+	finally:
+		for temporary_path in temporary_paths:
+			temporary_path.unlink(missing_ok=True)
+		for backup_path in backup_paths:
+			backup_path.unlink(missing_ok=True)
+
+
+def rollback_applied_patch(repo_path: str | Path, prepared_patch: PreparedPatch) -> None:
+	"""Restore original file contents after a post-apply failure (e.g. the
+	review-state commit failed). Raises PatchError if any file no longer
+	matches the applied content — the caller must alarm, not guess."""
+	root = Path(repo_path).resolve()
+	for file_patch in prepared_patch.files:
+		_validate_relative_path(file_patch.path)
+		path = root.joinpath(*PurePosixPath(file_patch.path).parts)
+		if not path.is_file():
+			raise PatchError(f"Rollback target missing: {file_patch.path}")
+		current = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+		if current != file_patch.after.replace("\r\n", "\n"):
+			raise PatchError(f"Rollback target changed since apply: {file_patch.path}")
+		path.write_text(file_patch.before, encoding="utf-8")
+
+
+def _validate_relative_path(relative_path: str) -> None:
+	parsed = PurePosixPath(relative_path)
+	if not relative_path or parsed.is_absolute() or ".." in parsed.parts or "\\" in relative_path:
+		raise PatchError(f"Unsafe documentation path: {relative_path}")
+
+
+def _apply_edit(text: str, path: str, edit: DocumentEdit) -> str:
+	lines = text.splitlines(keepends=True)
+	headings: list[tuple[int, int, str]] = []
+	for index, line in enumerate(lines):
+		match = _HEADING_PATTERN.match(line.rstrip("\r\n"))
+		if match:
+			headings.append((index, len(match.group(1)), match.group(2).strip()))
+
+	if edit.action == "create":
+		existing = next(
+			(
+				heading
+				for _, _, heading in headings
+				if heading.casefold() == edit.section.strip().casefold()
+			),
+			None,
+		)
+		if existing is not None:
+			edit = replace(edit, action="replace", section=existing)
+		else:
+			return _append_new_section(text, path, edit, headings)
+
+	if not headings:
+		if edit.section != Path(path).name:
+			raise PatchError(f"Section not found in {path}: {edit.section}")
+		start, end = 0, len(lines)
+		heading_line = ""
+	else:
+		matches = [heading for heading in headings if heading[2] == edit.section]
+		if edit.start_line is not None:
+			matches = [heading for heading in matches if heading[0] + 1 == edit.start_line]
+		if len(matches) != 1:
+			raise PatchError(f"Section is missing or ambiguous in {path}: {edit.section}")
+		start, _, _ = matches[0]
+		end = len(lines)
+		for next_index, _, _ in headings:
+			if next_index > start:
+				end = next_index
+				break
+		heading_line = lines[start].rstrip("\r\n")
+
+	separator_start = end
+	while separator_start > start and not lines[separator_start - 1].strip():
+		separator_start -= 1
+	separator_lines = lines[separator_start:end]
+
+	replacement_content = edit.content.strip()
+	if not replacement_content:
+		raise PatchError(f"Section content cannot be empty: {path} / {edit.section}")
+	if edit.action == "append":
+		existing = "".join(lines[start + 1 : end]) if heading_line else "".join(lines[start:end])
+		replacement_content = f"{existing.rstrip()}\n\n{replacement_content}" if existing.strip() else replacement_content
+
+	replacement = []
+	if heading_line:
+		replacement.extend([heading_line, "\n", "\n"])
+	replacement.extend([replacement_content, "\n"])
+	replacement.extend(separator_lines)
+	lines[start:end] = replacement
+	return "".join(lines)
+
+
+def _append_new_section(
+	text: str,
+	path: str,
+	edit: DocumentEdit,
+	headings: list[tuple[int, int, str]],
+) -> str:
+	section = edit.section.strip()
+	content = edit.content.strip()
+	if not section or not content:
+		raise PatchError(f"New section heading and content cannot be empty: {path}")
+	if "\n" in section or "\r" in section:
+		raise PatchError(f"New section heading must be a single line: {path}")
+	if any(heading.casefold() == section.casefold() for _, _, heading in headings):
+		raise PatchError(f"New section already exists in {path}: {section}")
+
+	level = 1
+	if headings:
+		shallowest_level = min(heading_level for _, heading_level, _ in headings)
+		level = shallowest_level + 1 if shallowest_level == 1 else shallowest_level
+		level = min(level, 6)
+	new_section = f"{'#' * level} {section}\n\n{content}\n"
+	if not text:
+		return new_section
+	separator = "\n" if text.endswith("\n\n") else "\n\n"
+	if text.endswith("\n"):
+		separator = "\n" if not text.endswith("\n\n") else ""
+	return f"{text}{separator}{new_section}"

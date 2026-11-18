@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1794683429966,
+      "tag": "0000_init_0001",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794685354782,
+      "tag": "0001_hardening_0001",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794736800000,
+      "tag": "0002_durable_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794736860000,
+      "tag": "0003_github_pr_publishing",
+      "breakpoints": true
+    }
+  ]
+}

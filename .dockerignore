@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env
+data
+repos
+backend/**/__pycache__
+backend/data
+*.pyc
+docker-compose.yml
+README.md
