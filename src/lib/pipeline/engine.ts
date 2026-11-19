@@ -4,6 +4,9 @@
 // bounded inputs, evidence-linked edits, human-reviewable output only.
 
 export type SignalKind = "endpoint" | "endpoint_removed" | "symbol" | "env" | "version" | "deprecation";
+export type DocumentKind = "api" | "developer" | "user" | "blog" | "other";
+
+const DOC_KINDS: DocumentKind[] = ["api", "developer", "user", "blog", "other"];
 
 export interface Signal {
   kind: SignalKind;
@@ -24,6 +27,7 @@ export interface DocSection {
   documentId: string;
   docPath: string;
   docTitle: string;
+  docKind: DocumentKind;
   docVersion: number;
   heading: string;
   level: number;
@@ -247,6 +251,7 @@ export function splitSections(doc: {
   title: string;
   content: string;
   version: number;
+  docKind?: string;
 }): DocSection[] {
   const lines = doc.content.split("\n");
   const marks: { idx: number; level: number; heading: string }[] = [];
@@ -275,6 +280,7 @@ export function splitSections(doc: {
       documentId: doc.id,
       docPath: doc.path,
       docTitle: doc.title,
+      docKind: docKindOf(doc),
       docVersion: doc.version,
       heading: start.heading,
       level: start.level,
@@ -321,6 +327,18 @@ const matchTokens = (s: Signal): { t: string; w: number }[] => {
 
 const escapeRe = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+function documentKind(path: string): DocumentKind {
+  if (/(^|\/)(api|reference|openapi)(\/|[-_.]|$)/i.test(path)) return "api";
+  if (/(^|\/)(developer|setup|sdk|contributing)(\/|[-_.]|$)/i.test(path)) return "developer";
+  if (/(^|\/)(user|guide|tutorial)(\/|[-_.]|$)/i.test(path)) return "user";
+  if (/(^|\/)(blog|changelog|release|releases)(\/|[-_.]|$)/i.test(path)) return "blog";
+  return "other";
+}
+
+function docKindOf(doc: { path: string; docKind?: string }): DocumentKind {
+  return DOC_KINDS.find((kind) => kind === doc.docKind) ?? documentKind(doc.path);
+}
+
 function sectionScore(body: string, s: Signal): number {
   const hay = body.toLowerCase();
   let w = 0;
@@ -333,58 +351,141 @@ function sectionScore(body: string, s: Signal): number {
   return w;
 }
 
-/** Retrieve the strongest section per document; changelog always qualifies. */
-export function retrieveSections(
-  docs: { id: string; path: string; title: string; content: string; version: number }[],
-  signals: Signal[],
-  maxDocs = 4,
-  changedFiles: string[] = []
-): { section: DocSection; matched: Signal[] }[] {
-  const ranked: { section: DocSection; matched: Signal[]; score: number }[] = [];
-  const fileTokens = [...new Set(changedFiles.flatMap((path) => {
-    const file = path.split("/").pop() ?? path;
-    const stem = file.replace(/\.[^.]+$/, "");
-    return [
-      stem.toLowerCase().replace(/[_-]+/g, " "),
-      ...stem.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[_\-\s]+/).map((token) => token.toLowerCase()),
-    ].filter((token) => token.length >= 4);
-  }))];
+const RETRIEVAL_STOPWORDS = new Set([
+  "about", "after", "again", "against", "also", "and", "any", "are", "because",
+  "been", "before", "being", "between", "both", "but", "can", "could", "did",
+  "does", "doing", "down", "during", "each", "few", "for", "from", "further",
+  "had", "has", "have", "having", "here", "hers", "him", "his", "how", "into",
+  "its", "itself", "just", "more", "most", "much", "must", "new", "nor", "not",
+  "now", "off", "once", "only", "other", "our", "out", "over", "own", "same",
+  "should", "some", "such", "than", "that", "the", "their", "them", "then",
+  "there", "these", "they", "this", "those", "through", "too", "under", "until",
+  "very", "was", "were", "what", "when", "where", "which", "while", "who",
+  "whom", "why", "will", "with", "would", "you", "your", "added", "adding",
+  "change", "changed", "changes", "changing", "documentation", "docs", "feature",
+  "features", "fix", "fixed", "implement", "implemented", "release", "updated",
+  "update", "updates", "updating", "readme", "diff", "file", "files", "line",
+  "lines", "true", "false", "null", "none", "const", "let", "var", "return",
+  "class", "function", "import", "export", "from", "async", "await", "string",
+  "number", "boolean", "get", "set", "post", "put", "patch", "delete", "http",
+  "https", "json", "api",
+]);
+const MAX_RETRIEVAL_KEYWORDS = 500;
+const DEFAULT_RETRIEVAL_BUDGET = 32_000;
 
-  for (const doc of docs) {
-    const sections = splitSections(doc);
-    const isChangelog = /changelog|release-notes|releases/i.test(doc.path);
-    let best: { section: DocSection; matched: Signal[]; score: number } | null = null;
-    for (const section of sections) {
-      const matched = signals.filter((s) => s.kind !== "version" && s.kind !== "endpoint_removed" && sectionScore(section.body, s) > 0);
-      const haystack = `${section.heading}\n${section.body}\n${doc.title}\n${doc.path}`.toLowerCase();
-      const pathScore = fileTokens.reduce((score, token) => {
-        const expression = new RegExp(`\\b${escapeRe(token)}\\b`, "i");
-        return expression.test(haystack) ? score + (token.includes(" ") ? 2 : 1) : score;
-      }, 0);
-      const score = matched.reduce((a, s) => a + sectionScore(section.body, s), 0) + pathScore;
-      if (score > 0 && (!best || score > best.score)) best = { section, matched, score };
-    }
-    if (!best && isChangelog && sections.length > 0) {
-      best = { section: sections[0], matched: [], score: 0.5 };
-    }
-    if (best) ranked.push(best);
-  }
-
-  ranked.sort((a, b) => b.score - a.score);
-  const chosen = ranked.filter((r) => r.score > 0).slice(0, maxDocs);
-  const changelog = ranked.find((r) => r.score === 0.5);
-  if (changelog && !chosen.includes(changelog)) chosen.push(changelog);
-  return chosen.slice(0, maxDocs + 1);
+function normalizeSearchText(value: string): string {
+  return value
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
-const DOC_KINDS = ["api", "developer", "user", "blog", "other"] as const;
+function retrievalTerms(value: string): string[] {
+  const normalized = normalizeSearchText(value);
+  return normalized
+    .split(/\s+/)
+    .filter((term) => term.length >= 4 && !RETRIEVAL_STOPWORDS.has(term));
+}
 
-function documentKind(path: string): (typeof DOC_KINDS)[number] {
-  if (/(^|\/)(api|reference|openapi)(\/|[-_.]|$)/i.test(path)) return "api";
-  if (/(^|\/)(developer|setup|sdk|contributing)(\/|[-_.]|$)/i.test(path)) return "developer";
-  if (/(^|\/)(user|guide|tutorial)(\/|[-_.]|$)/i.test(path)) return "user";
-  if (/(^|\/)(blog|changelog|release|releases)(\/|[-_.]|$)/i.test(path)) return "blog";
-  return "other";
+interface RetrievalOptions {
+  signals: Signal[];
+  diffText?: string;
+  changeSummary?: string;
+  changedFiles?: string[];
+  maxSectionsPerDoc?: number;
+  maxChars?: number;
+}
+
+/** Retrieve relevant sections across document kinds within a bounded context budget. */
+export function retrieveSections(
+  docs: { id: string; path: string; title: string; content: string; version: number; docKind?: string }[],
+  options: RetrievalOptions
+): { section: DocSection; matched: Signal[] }[] {
+  const maxSectionsPerDoc = options.maxSectionsPerDoc ?? 4;
+  const maxChars = options.maxChars ?? DEFAULT_RETRIEVAL_BUDGET;
+  const changedFiles = options.changedFiles ?? [];
+  const keywords = new Map<string, number>();
+  const addKeywords = (text: string, weight: number) => {
+    for (const term of retrievalTerms(text)) {
+      if (keywords.has(term)) {
+        keywords.set(term, Math.max(keywords.get(term) ?? 0, weight));
+      } else if (keywords.size < MAX_RETRIEVAL_KEYWORDS) {
+        keywords.set(term, weight);
+      }
+    }
+  };
+  addKeywords(options.changeSummary ?? "", 3);
+  addKeywords(changedFiles.join("\n"), 2);
+  const changedLines = (options.diffText ?? "").split(/\r?\n/).filter((line) =>
+    (line.startsWith("+") && !line.startsWith("+++")) ||
+    (line.startsWith("-") && !line.startsWith("---"))
+  );
+  addKeywords(changedLines.map((line) => line.slice(1)).join("\n"), 1);
+
+  const candidates = docs.flatMap((doc) =>
+    splitSections(doc).map((section) => {
+      const matched = options.signals.filter((signal) =>
+        signal.kind !== "version" &&
+        signal.kind !== "endpoint_removed" &&
+        sectionScore(`${section.heading}\n${section.body}`, signal) > 0
+      );
+      const haystack = ` ${normalizeSearchText(
+        `${section.heading}\n${section.body}\n${doc.title}\n${doc.path}`
+      )} `;
+      const keywordScore = [...keywords].reduce(
+        (score, [term, weight]) => score + (haystack.includes(` ${term} `) ? weight : 0),
+        0
+      );
+      const signalScore = matched.reduce(
+        (score, signal) => score + sectionScore(`${section.heading}\n${section.body}`, signal),
+        0
+      );
+      return { section, matched, score: keywordScore + signalScore };
+    })
+  ).sort((a, b) =>
+    b.score - a.score ||
+    a.section.docPath.localeCompare(b.section.docPath) ||
+    a.section.heading.localeCompare(b.section.heading)
+  );
+
+  const kindsPresent = [...new Set(docs.map(docKindOf))];
+  const kindBudget = Math.floor(maxChars / Math.max(kindsPresent.length, 1));
+  const selected: { section: DocSection; matched: Signal[] }[] = [];
+  const selectedIds = new Set<string>();
+  const sectionCounts = new Map<string, number>();
+  let usedChars = 0;
+  const addCandidate = (
+    candidate: (typeof candidates)[number],
+    maxCandidateChars = maxChars - usedChars
+  ) => {
+    const { section } = candidate;
+    const key = `${section.docPath}\0${section.heading}`;
+    if (
+      selectedIds.has(key) ||
+      (sectionCounts.get(section.docPath) ?? 0) >= maxSectionsPerDoc ||
+      section.body.length > maxCandidateChars ||
+      section.body.length > maxChars - usedChars
+    ) return false;
+    selected.push({ section, matched: candidate.matched });
+    selectedIds.add(key);
+    sectionCounts.set(section.docPath, (sectionCounts.get(section.docPath) ?? 0) + 1);
+    usedChars += section.body.length;
+    return true;
+  };
+
+  // Reserve one relevant section per present document kind before filling by score.
+  for (const kind of kindsPresent) {
+    const ofKind = candidates.filter(({ section }) => section.docKind === kind);
+    const top = ofKind.find(({ section }) => section.body.length <= kindBudget);
+    if (top) addCandidate(top, kindBudget);
+  }
+  for (const candidate of candidates) {
+    if (candidate.score > 0) addCandidate(candidate);
+  }
+
+  return selected;
 }
 
 /** Broad but bounded context for providers when keyword retrieval is too sparse. */
@@ -407,9 +508,7 @@ export function fallbackSectionsByKind(
   }))];
   const candidatesByKind = DOC_KINDS.map((kind) =>
     docs
-      .filter((doc) => (DOC_KINDS.includes(doc.docKind as (typeof DOC_KINDS)[number])
-        ? doc.docKind === kind
-        : documentKind(doc.path) === kind))
+      .filter((doc) => docKindOf(doc) === kind)
       .flatMap((doc) => splitSections(doc).map((section) => {
         const haystack = `${section.heading}\n${section.body}\n${doc.title}\n${doc.path}`.toLowerCase();
         const signalScore = signals.reduce((score, signal) => (
@@ -505,15 +604,26 @@ export function draftSectionEdit(
 
 /** Assemble the full review proposal from retrieved sections. */
 export function buildProposal(input: {
-  docs: { id: string; path: string; title: string; content: string; version: number }[];
+  docs: { id: string; path: string; title: string; content: string; version: number; docKind?: string }[];
   files: DiffFile[];
   signals: Signal[];
   tone: ToneProfileLite;
+  diffText?: string;
+  changeSummary?: string;
   llm?: boolean;
 }): Proposal {
   const { docs, files, signals, tone } = input;
   const version = signals.find((s) => s.kind === "version")?.value ?? null;
-  const retrieved = retrieveSections(docs, signals, 4, files.map((file) => file.path));
+  const diffText = input.diffText ?? files.flatMap((file) => [
+    ...file.removedLines.map((line) => `-${line.text}`),
+    ...file.added.map((line) => `+${line.text}`),
+  ]).join("\n");
+  const retrieved = retrieveSections(docs, {
+    signals,
+    diffText,
+    changeSummary: input.changeSummary,
+    changedFiles: files.map((file) => file.path),
+  });
   const edits = retrieved.map(({ section, matched }) => {
     const isChangelog = /changelog|release/i.test(section.docPath);
     // A changelog summarizes the whole release, even when its own prose
@@ -587,6 +697,7 @@ export function validateProposal(
 ): string | null {
   const validRefs = new Set(
     files.flatMap((f) => [
+      f.path,
       ...f.added.map((a) => `${f.path}:L${a.n}`),
       ...f.removedLines.map((r) => `${f.path}:L${r.n}`),
     ])

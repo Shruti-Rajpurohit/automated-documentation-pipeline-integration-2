@@ -15,7 +15,6 @@ import {
   buildProposal,
   DiffLimitError,
   extractSignals,
-  fallbackSectionsByKind,
   parseDiff,
   retrieveSections,
   validateProposal,
@@ -135,11 +134,12 @@ export async function runPipeline(
   let providerNote: string | null = null;
   const incompleteInput = Boolean(input.truncated || parseLimit);
   if ((input.provider === "openrouter" || input.provider === "ollama") && !incompleteInput) {
-    let retrieved = retrieveSections(docs, signals, 4, files.map((file) => file.path))
-      .map((r) => r.section);
-    if (retrieved.length < 2) {
-      retrieved = fallbackSectionsByKind(docs, signals, files.map((file) => file.path));
-    }
+    const retrieved = retrieveSections(docs, {
+      signals,
+      diffText: input.diffText,
+      changeSummary: input.changeSummary,
+      changedFiles: files.map((file) => file.path),
+    }).map((result) => result.section);
     const modelInput = {
       model: input.model,
       productName: product.name,
@@ -159,7 +159,14 @@ export async function runPipeline(
     }
   }
   if (!proposal) {
-    proposal = buildProposal({ docs, files, signals, tone });
+    proposal = buildProposal({
+      docs,
+      files,
+      signals,
+      tone,
+      diffText: input.diffText,
+      changeSummary: input.changeSummary,
+    });
   }
 
   const invalid = validateProposal(proposal, docs, files);
@@ -183,6 +190,7 @@ export async function runPipeline(
     ...(noReviewableEdit
       ? ["The diff contains changes, but the pipeline could not produce a verified documentation edit."]
       : []),
+    ...(providerNote ? [`LLM provider notice: ${providerNote}`] : []),
     ...(invalid ? [`Proposal rejected by validator: ${invalid}`] : []),
     ...proposal.uncertainties,
   ];

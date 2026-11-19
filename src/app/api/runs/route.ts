@@ -4,7 +4,7 @@ import { resolveMachineActor, resolveRequestActor } from "@/lib/identity";
 import { readRequestBodyText } from "@/lib/request-body";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 180;
 const MAX_REQUEST_BYTES = 1_000_000;
 
 export async function POST(req: Request) {
