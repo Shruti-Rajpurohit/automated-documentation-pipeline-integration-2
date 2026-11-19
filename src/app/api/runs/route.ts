@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { runPipeline } from "@/lib/actions";
+import { db } from "@/db";
+import { pipelineJobs } from "@/db/schema";
+import { runPipeline, uid } from "@/lib/actions";
 import { resolveMachineActor, resolveRequestActor } from "@/lib/identity";
 import { readRequestBodyText } from "@/lib/request-body";
 
@@ -32,7 +34,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Missing field: ${key}` }, { status: 400 });
       }
     }
-    const result = await runPipeline({
+    const runInput = {
       productId: body.productId as string,
       baseRevision: body.baseRevision as string,
       headRevision: body.headRevision as string,
@@ -44,7 +46,30 @@ export async function POST(req: Request) {
       triggerType: typeof body.triggerType === "string" ? body.triggerType : "MANUAL",
       actor,
       title: typeof body.title === "string" && body.title ? body.title : undefined,
-    });
+    };
+    if (body.async === true) {
+      const jobId = uid();
+      await db.insert(pipelineJobs).values({
+        id: jobId,
+        jobType: "manual_run",
+        dedupeKey: `manual:${jobId}`,
+        payload: {
+          productId: runInput.productId,
+          baseRevision: runInput.baseRevision,
+          headRevision: runInput.headRevision,
+          changeSummary: runInput.changeSummary,
+          provider: runInput.provider,
+          model: runInput.model,
+          diffText: runInput.diffText,
+          triggerType: runInput.triggerType,
+          actorId: actor.id,
+          title: runInput.title,
+          truncated: runInput.truncated,
+        },
+      });
+      return NextResponse.json({ jobId, status: "QUEUED" }, { status: 202 });
+    }
+    const result = await runPipeline(runInput);
     return NextResponse.json(result);
   } catch (e) {
     return NextResponse.json(

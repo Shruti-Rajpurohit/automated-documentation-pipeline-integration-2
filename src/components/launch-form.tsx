@@ -161,16 +161,37 @@ export function LaunchForm({
           model: provider === "local" ? "docline-local-1" : model,
           diffText,
           triggerType: "MANUAL",
+          async: true,
         }),
       });
       const result = await response.json();
-      if (!response.ok || !result.sessionId) throw new Error(result.error ?? "Pipeline run failed.");
-      clearInterval(timer);
-      router.push(`/sessions/${result.sessionId}`);
+      if (!response.ok || typeof result.jobId !== "string") {
+        throw new Error(result.error ?? "Could not queue pipeline run.");
+      }
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        const jobResponse = await fetch(`/api/jobs/${encodeURIComponent(result.jobId)}`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(15_000),
+        });
+        const job = await jobResponse.json();
+        if (!jobResponse.ok) throw new Error(job.error ?? "Could not check pipeline run status.");
+        if (job.status === "COMPLETED") {
+          if (typeof job.result?.sessionId !== "string") {
+            throw new Error("Pipeline job completed without returning a session.");
+          }
+          router.push(`/sessions/${job.result.sessionId}`);
+          return;
+        }
+        if (job.status === "FAILED") {
+          throw new Error(job.lastError || "Pipeline run failed.");
+        }
+      }
     } catch (reason) {
-      clearInterval(timer);
       setError(reason instanceof Error ? reason.message : "Pipeline run failed.");
       setRunning(false);
+    } finally {
+      clearInterval(timer);
     }
   }
 

@@ -1,4 +1,7 @@
-import { pool } from "@/db";
+import { eq } from "drizzle-orm";
+import { db, pool } from "@/db";
+import { users } from "@/db/schema";
+import type { Actor } from "@/lib/identity";
 import { runPipeline, serverActorByRole } from "@/lib/actions";
 
 type QueueRow = {
@@ -47,6 +50,29 @@ async function claimJob(): Promise<QueueRow | null> {
 }
 
 async function executeJob(job: QueueRow): Promise<{ sessionId: string; status: string }> {
+  if (job.job_type === "manual_run") {
+    const payload = job.payload;
+    const actorId = requiredString(payload, "actorId");
+    const [actorRow] = await db
+      .select({ id: users.id, name: users.name, role: users.role, email: users.email })
+      .from(users)
+      .where(eq(users.id, actorId));
+    if (!actorRow) throw new Error("The run's user identity no longer exists.");
+    const actor: Actor = actorRow;
+    return runPipeline({
+      productId: requiredString(payload, "productId"),
+      baseRevision: requiredString(payload, "baseRevision"),
+      headRevision: requiredString(payload, "headRevision"),
+      changeSummary: typeof payload.changeSummary === "string" ? payload.changeSummary : "",
+      provider: requiredString(payload, "provider"),
+      model: requiredString(payload, "model"),
+      diffText: requiredString(payload, "diffText"),
+      triggerType: typeof payload.triggerType === "string" ? payload.triggerType : "MANUAL",
+      actor,
+      title: typeof payload.title === "string" ? payload.title : undefined,
+      truncated: payload.truncated === true,
+    });
+  }
   if (job.job_type !== "github_push") {
     throw new Error(`Unsupported queued job type: ${job.job_type}`);
   }
@@ -86,6 +112,19 @@ async function runWorker(): Promise<void> {
       continue;
     }
 
+    const heartbeat = setInterval(() => {
+      void pool.query(
+        `UPDATE pipeline_jobs
+         SET locked_at = now(), updated_at = now()
+         WHERE id = $1 AND status = 'RUNNING'`,
+        [job.id]
+      ).catch((error: unknown) => {
+        console.error("[docline] pipeline job heartbeat failed", {
+          jobId: job.id,
+          errorType: error instanceof Error ? error.name : "unknown",
+        });
+      });
+    }, 60_000);
     try {
       const result = await executeJob(job);
       await pool.query(
@@ -97,6 +136,7 @@ async function runWorker(): Promise<void> {
       );
     } catch (error) {
       const errorType = error instanceof Error ? error.name : "unknown";
+      const errorMessage = error instanceof Error ? error.message : "Unknown job execution error";
       const failed = job.attempts >= MAX_ATTEMPTS;
       const delaySeconds = Math.min(300, 2 ** job.attempts * 5);
       await pool.query(
@@ -106,7 +146,7 @@ async function runWorker(): Promise<void> {
                THEN now() + ($3 * interval '1 second') ELSE available_at END,
              locked_at = NULL, last_error = $4, updated_at = now()
          WHERE id = $1`,
-        [job.id, failed ? "FAILED" : "QUEUED", delaySeconds, `Execution failed (${errorType})`]
+        [job.id, failed ? "FAILED" : "QUEUED", delaySeconds, errorMessage.slice(0, 1000)]
       );
       console.error("[docline] pipeline job failed", {
         jobId: job.id,
@@ -114,6 +154,8 @@ async function runWorker(): Promise<void> {
         willRetry: !failed,
         errorType,
       });
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 }
