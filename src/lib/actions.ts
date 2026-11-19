@@ -15,6 +15,7 @@ import {
   buildProposal,
   DiffLimitError,
   extractSignals,
+  fallbackSectionsByKind,
   parseDiff,
   retrieveSections,
   validateProposal,
@@ -134,7 +135,11 @@ export async function runPipeline(
   let providerNote: string | null = null;
   const incompleteInput = Boolean(input.truncated || parseLimit);
   if ((input.provider === "openrouter" || input.provider === "ollama") && !incompleteInput) {
-    const retrieved = retrieveSections(docs, signals).map((r) => r.section);
+    let retrieved = retrieveSections(docs, signals, 4, files.map((file) => file.path))
+      .map((r) => r.section);
+    if (retrieved.length < 2) {
+      retrieved = fallbackSectionsByKind(docs, signals, files.map((file) => file.path));
+    }
     const modelInput = {
       model: input.model,
       productName: product.name,
@@ -145,17 +150,21 @@ export async function runPipeline(
       sections: retrieved,
       signals,
     };
-    proposal = input.provider === "ollama"
+    const result = input.provider === "ollama"
       ? await tryOllama(modelInput)
       : await tryOpenRouter(modelInput);
-    if (!proposal) providerNote = `${input.provider}_unavailable_or_invalid_fell_back_to_local`;
+    proposal = result.proposal;
+    if (!proposal) {
+      providerNote = `${input.provider}_fell_back_to_local: ${result.reason ?? "unknown failure"}`;
+    }
   }
   if (!proposal) {
     proposal = buildProposal({ docs, files, signals, tone });
   }
 
   const invalid = validateProposal(proposal, docs, files);
-  const insufficientSignals = !incompleteInput && files.length > 0 && signals.length === 0;
+  const insufficientSignals = !invalid && (!proposal.llm || proposal.edits.length === 0) &&
+    !incompleteInput && files.length > 0 && signals.length === 0;
   const noReviewableEdit = !incompleteInput && files.length > 0 && proposal.edits.length === 0;
   const needsInvestigation = incompleteInput || insufficientSignals || noReviewableEdit;
   const status = invalid || needsInvestigation

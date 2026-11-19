@@ -54,7 +54,12 @@ export function LaunchForm({
     setProductSettings({ ...settings, ...update });
   }
   function setSource(value: SourceMode) {
+    setError("");
     updateSettings({ source: value });
+  }
+  function switchProduct(value: string) {
+    setError("");
+    setProductId(value);
   }
   function setProvider(value: Provider, nextModel?: string) {
     updateSettings({ provider: value, ...(nextModel ? { model: nextModel } : {}) });
@@ -99,7 +104,10 @@ export function LaunchForm({
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error ?? "Could not load repository refs.");
-        if (active) setRefsResult({ key, refs: result.refs ?? [] });
+        if (active) {
+          setRefsResult({ key, refs: result.refs ?? [] });
+          setError("");
+        }
       })
       .catch((reason) => {
         if (active) {
@@ -187,7 +195,7 @@ export function LaunchForm({
           <div className="kicker mb-2">1 · Product</div>
           <div className="grid gap-3 sm:grid-cols-2">
             {products.map((item) => (
-              <button key={item.id} onClick={() => { setProductId(item.id); setBaseRevision(""); setHeadRevision("HEAD"); }} className={cx(card, productId === item.id && "border-mint/40 bg-mint-dim/40")}>
+              <button key={item.id} onClick={() => { switchProduct(item.id); setBaseRevision(""); setHeadRevision("HEAD"); }} className={cx(card, productId === item.id && "border-mint/40 bg-mint-dim/40")}>
                 <span className="flex items-center gap-2 text-[14px] font-medium text-snow"><Package size={14} />{item.name}</span>
                 <span className="mt-1 block text-[12px] text-fog">{item.tagline}</span>
                 <span className="mt-2 block truncate font-mono text-[10px] text-fog">{item.sourceRepoUrl || item.sourceRepoPath}</span>

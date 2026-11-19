@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Save } from "lucide-react";
+import { RefreshCw, Save, Trash2 } from "lucide-react";
 
 export interface ManagedProduct {
   id: string;
@@ -115,6 +115,29 @@ export function ProductManager({ products }: { products: ManagedProduct[] }) {
     }
   }
 
+  async function deleteProduct() {
+    if (!selected || !window.confirm(`Delete "${selected.name}" and its documents, sessions, and audit history? This cannot be undone.`)) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/products/${selected.id}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not delete product.");
+      setSelectedId("");
+      setForm(EMPTY);
+      setRulesText("");
+      setMessage("Product and associated data deleted.");
+      router.refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not delete product.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="grid gap-5 lg:grid-cols-[260px_1fr]">
       <aside className="card h-fit p-4">
@@ -201,9 +224,14 @@ export function ProductManager({ products }: { products: ManagedProduct[] }) {
             <Save size={13} /> {busy ? "Saving…" : selected ? "Save product" : "Create product"}
           </button>
           {selected && (
-            <button type="button" disabled={busy} onClick={syncDocs} className="inline-flex items-center gap-2 rounded-lg border border-hairline px-4 py-2 text-[12px] text-snow disabled:opacity-50">
-              <RefreshCw size={13} /> Sync documentation
-            </button>
+            <>
+              <button type="button" disabled={busy} onClick={syncDocs} className="inline-flex items-center gap-2 rounded-lg border border-hairline px-4 py-2 text-[12px] text-snow disabled:opacity-50">
+                <RefreshCw size={13} /> Sync documentation
+              </button>
+              <button type="button" disabled={busy} onClick={deleteProduct} className="inline-flex items-center gap-2 rounded-lg border border-coral/40 px-4 py-2 text-[12px] text-coral disabled:opacity-50">
+                <Trash2 size={13} /> Delete product
+              </button>
+            </>
           )}
         </div>
       </form>

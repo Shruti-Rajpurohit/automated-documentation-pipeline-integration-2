@@ -337,9 +337,18 @@ function sectionScore(body: string, s: Signal): number {
 export function retrieveSections(
   docs: { id: string; path: string; title: string; content: string; version: number }[],
   signals: Signal[],
-  maxDocs = 4
+  maxDocs = 4,
+  changedFiles: string[] = []
 ): { section: DocSection; matched: Signal[] }[] {
   const ranked: { section: DocSection; matched: Signal[]; score: number }[] = [];
+  const fileTokens = [...new Set(changedFiles.flatMap((path) => {
+    const file = path.split("/").pop() ?? path;
+    const stem = file.replace(/\.[^.]+$/, "");
+    return [
+      stem.toLowerCase().replace(/[_-]+/g, " "),
+      ...stem.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[_\-\s]+/).map((token) => token.toLowerCase()),
+    ].filter((token) => token.length >= 4);
+  }))];
 
   for (const doc of docs) {
     const sections = splitSections(doc);
@@ -347,7 +356,12 @@ export function retrieveSections(
     let best: { section: DocSection; matched: Signal[]; score: number } | null = null;
     for (const section of sections) {
       const matched = signals.filter((s) => s.kind !== "version" && s.kind !== "endpoint_removed" && sectionScore(section.body, s) > 0);
-      const score = matched.reduce((a, s) => a + sectionScore(section.body, s), 0);
+      const haystack = `${section.heading}\n${section.body}\n${doc.title}\n${doc.path}`.toLowerCase();
+      const pathScore = fileTokens.reduce((score, token) => {
+        const expression = new RegExp(`\\b${escapeRe(token)}\\b`, "i");
+        return expression.test(haystack) ? score + (token.includes(" ") ? 2 : 1) : score;
+      }, 0);
+      const score = matched.reduce((a, s) => a + sectionScore(section.body, s), 0) + pathScore;
       if (score > 0 && (!best || score > best.score)) best = { section, matched, score };
     }
     if (!best && isChangelog && sections.length > 0) {
@@ -361,6 +375,68 @@ export function retrieveSections(
   const changelog = ranked.find((r) => r.score === 0.5);
   if (changelog && !chosen.includes(changelog)) chosen.push(changelog);
   return chosen.slice(0, maxDocs + 1);
+}
+
+const DOC_KINDS = ["api", "developer", "user", "blog", "other"] as const;
+
+function documentKind(path: string): (typeof DOC_KINDS)[number] {
+  if (/(^|\/)(api|reference|openapi)(\/|[-_.]|$)/i.test(path)) return "api";
+  if (/(^|\/)(developer|setup|sdk|contributing)(\/|[-_.]|$)/i.test(path)) return "developer";
+  if (/(^|\/)(user|guide|tutorial)(\/|[-_.]|$)/i.test(path)) return "user";
+  if (/(^|\/)(blog|changelog|release|releases)(\/|[-_.]|$)/i.test(path)) return "blog";
+  return "other";
+}
+
+/** Broad but bounded context for providers when keyword retrieval is too sparse. */
+export function fallbackSectionsByKind(
+  docs: { id: string; path: string; title: string; content: string; version: number; docKind?: string }[],
+  signals: Signal[],
+  changedFiles: string[],
+  maxChars = 24_000
+): DocSection[] {
+  const selected: DocSection[] = [];
+  let usedChars = 0;
+  const selectedSections = new Set<string>();
+  const changedTokens = [...new Set(changedFiles.flatMap((path) => {
+    const stem = (path.split("/").pop() ?? path).replace(/\.[^.]+$/, "");
+    return stem
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .split(/[_\-\s]+/)
+      .map((token) => token.toLowerCase())
+      .filter((token) => token.length >= 4);
+  }))];
+  const candidatesByKind = DOC_KINDS.map((kind) =>
+    docs
+      .filter((doc) => (DOC_KINDS.includes(doc.docKind as (typeof DOC_KINDS)[number])
+        ? doc.docKind === kind
+        : documentKind(doc.path) === kind))
+      .flatMap((doc) => splitSections(doc).map((section) => {
+        const haystack = `${section.heading}\n${section.body}\n${doc.title}\n${doc.path}`.toLowerCase();
+        const signalScore = signals.reduce((score, signal) => (
+          score + sectionScore(`${section.heading}\n${section.body}`, signal)
+        ), 0);
+        const pathScore = changedTokens.reduce((score, token) => (
+          score + (new RegExp(`\\b${escapeRe(token)}\\b`, "i").test(haystack) ? 1 : 0)
+        ), 0);
+        return { section, score: signalScore + pathScore };
+      }))
+      .sort((a, b) => b.score - a.score || a.section.docPath.localeCompare(b.section.docPath))
+  );
+  const addOne = (candidates: (typeof candidatesByKind)[number], maxSectionChars: number) => {
+    const candidate = candidates.find(({ section }) =>
+      section.body.length > 0 &&
+      section.body.length <= maxSectionChars &&
+      usedChars + section.body.length <= maxChars &&
+      !selectedSections.has(`${section.docPath}:${section.heading}`)
+    );
+    if (!candidate) return;
+    selected.push(candidate.section);
+    selectedSections.add(`${candidate.section.docPath}:${candidate.section.heading}`);
+    usedChars += candidate.section.body.length;
+  };
+  for (const candidates of candidatesByKind) addOne(candidates, Math.min(4_800, maxChars));
+  for (const candidates of candidatesByKind) addOne(candidates, maxChars);
+  return selected;
 }
 
 // Published prose carries no internal source refs — citations belong to the
@@ -437,7 +513,7 @@ export function buildProposal(input: {
 }): Proposal {
   const { docs, files, signals, tone } = input;
   const version = signals.find((s) => s.kind === "version")?.value ?? null;
-  const retrieved = retrieveSections(docs, signals);
+  const retrieved = retrieveSections(docs, signals, 4, files.map((file) => file.path));
   const edits = retrieved.map(({ section, matched }) => {
     const isChangelog = /changelog|release/i.test(section.docPath);
     // A changelog summarizes the whole release, even when its own prose
@@ -518,14 +594,6 @@ export function validateProposal(
   for (const e of p.edits) {
     const doc = docs.find((d) => d.path === e.docPath);
     if (!doc) return `Edit targets unknown document ${e.docPath}.`;
-    if (allowedSections) {
-      const section = allowedSections.find(
-        (s) => s.docPath === e.docPath && s.heading === e.sectionHeading
-      );
-      if (!section || section.body !== e.before) {
-        return `Edit target ${e.docPath} / ${e.sectionHeading} was not retrieved for this run.`;
-      }
-    }
     if (e.action === "create") {
       if (e.before !== "") return `Create edit in ${e.docPath} must not replace existing prose.`;
       if (allowedSections && !allowedSections.some((s) => s.docPath === e.docPath)) {
@@ -533,8 +601,18 @@ export function validateProposal(
       }
       const heading = new RegExp(`^#{1,4}\\s+${escapeRe(e.sectionHeading)}\\s*$`, "m");
       if (heading.test(doc.content)) return `Section ${e.sectionHeading} already exists in ${e.docPath}.`;
-      if (!heading.test(e.after)) return `Create edit for ${e.docPath} must start with its new section heading.`;
+      if (!new RegExp(`^#{1,4}\\s+${escapeRe(e.sectionHeading)}\\s*(?:\\r?\\n|$)`).test(e.after)) {
+        return `Create edit for ${e.docPath} must start with its new section heading.`;
+      }
     } else {
+      if (allowedSections) {
+        const section = allowedSections.find(
+          (s) => s.docPath === e.docPath && s.heading === e.sectionHeading && s.body === e.before
+        );
+        if (!section) {
+          return `Edit target ${e.docPath} / ${e.sectionHeading} was not retrieved for this run.`;
+        }
+      }
       if (!doc.content.includes(e.before))
         return `Edit target in ${e.docPath} no longer matches the document.`;
       // Uniqueness: replacing a repeated fragment would hit an arbitrary match.
