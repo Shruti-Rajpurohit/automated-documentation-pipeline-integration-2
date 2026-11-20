@@ -26,6 +26,24 @@ function requiredString(payload: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function reportJobProgress(jobId: string): (stage: string) => Promise<void> {
+  return async (stage) => {
+    try {
+      await pool.query(
+        `UPDATE pipeline_jobs
+         SET result = jsonb_build_object('stage', $2), updated_at = now()
+         WHERE id = $1 AND status = 'RUNNING'`,
+        [jobId, stage]
+      );
+    } catch (error) {
+      console.error("[docline] pipeline job progress update failed", {
+        jobId,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+    }
+  };
+}
+
 async function claimJob(): Promise<QueueRow | null> {
   const result = await pool.query<QueueRow>(`
     WITH candidate AS (
@@ -71,6 +89,7 @@ async function executeJob(job: QueueRow): Promise<{ sessionId: string; status: s
       actor,
       title: typeof payload.title === "string" ? payload.title : undefined,
       truncated: payload.truncated === true,
+      onProgress: reportJobProgress(job.id),
     });
   }
   if (job.job_type !== "github_push") {
@@ -92,6 +111,7 @@ async function executeJob(job: QueueRow): Promise<{ sessionId: string; status: s
     title: requiredString(payload, "title"),
     deliveryId: requiredString(payload, "deliveryId"),
     truncated: payload.truncated === true,
+    onProgress: reportJobProgress(job.id),
   });
 }
 

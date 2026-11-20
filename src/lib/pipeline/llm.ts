@@ -23,6 +23,8 @@ export interface LLMProviderResult {
   reason: string | null;
 }
 
+export type ProgressCallback = (stage: string) => Promise<void> | void;
+
 interface LLMInput {
   model: string;
   productName: string;
@@ -32,6 +34,7 @@ interface LLMInput {
   docs: DocLike[];
   sections: DocSection[];
   signals: Signal[];
+  thoroughAudit?: boolean;
 }
 
 interface ParsedEdit {
@@ -61,8 +64,9 @@ interface ImpactReport {
 
 const DOC_KINDS: DocKind[] = ["api", "developer", "user", "blog", "other"];
 const MAX_ANALYSIS_DIFF_CHARS = 30_000;
-const MAX_STAGE2_SECTION_CHARS = 28_000;
-const REQUEST_TIMEOUT_MS = 120_000;
+const MAX_DOCUMENTS = 5;
+const MAX_DOCUMENT_CHARS = 10_000;
+const REQUEST_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 300_000);
 
 function rejected(provider: "openrouter" | "ollama", reason: string): LLMProviderResult {
   console.warn("[docline] LLM proposal failed/rejected:", `${provider}: ${reason}`);
@@ -264,7 +268,7 @@ async function requestModel(
         stream: false,
         options: {
           temperature: 0.2,
-          num_ctx: Number(process.env.OLLAMA_NUM_CTX || 16384),
+          num_ctx: Number(process.env.OLLAMA_NUM_CTX || 8192),
         },
       }),
     });
@@ -336,10 +340,18 @@ function compactSectionIndex(sections: DocSection[]) {
   }));
 }
 
-async function analyzeImpactReport(input: LLMInput, provider: Provider): Promise<ImpactReport | LLMProviderResult> {
+async function analyzeImpactReport(
+  input: LLMInput,
+  provider: Provider,
+  onProgress?: ProgressCallback
+): Promise<ImpactReport | LLMProviderResult> {
+  await onProgress?.("Pass 1/3: Analyzing release diff");
   const prompt = JSON.stringify({
     changeSummary: input.changeSummary,
-    diffText: input.diffText.slice(0, MAX_ANALYSIS_DIFF_CHARS),
+    diffText: input.diffText.slice(
+      0,
+      provider === "ollama" ? 20_000 : MAX_ANALYSIS_DIFF_CHARS
+    ),
     sectionIndex: compactSectionIndex(input.sections),
   });
   let correctionRequired: string | undefined;
@@ -358,135 +370,297 @@ async function analyzeImpactReport(input: LLMInput, provider: Provider): Promise
   return rejected(provider, `impact_report_rejected: ${correctionRequired ?? "retry_exhausted"}`);
 }
 
-function stage2Sections(input: LLMInput, report: ImpactReport): {
-  section: DocSection;
-  content: string;
-}[] {
-  const priority = new Map(report.affected_kinds.map((kind, index) => [kind, index]));
-  const ordered = input.sections
-    .map((section, index) => ({ section, index }))
-    .sort((a, b) =>
-      (priority.get(a.section.docKind as DocKind) ?? DOC_KINDS.length) -
-        (priority.get(b.section.docKind as DocKind) ?? DOC_KINDS.length) ||
-      a.index - b.index
-    );
-  const selected: { section: DocSection; content: string }[] = [];
-  const selectedIds = new Set<string>();
-  let used = 0;
-  const sectionSize = (section: DocSection) => JSON.stringify({
-    docPath: section.docPath,
-    docKind: section.docKind,
-    sectionHeading: section.heading,
-    content: section.body,
-  }).length;
-  const addSection = (section: DocSection, maxSize = MAX_STAGE2_SECTION_CHARS - used) => {
-    const key = `${section.docPath}\0${section.heading}`;
-    if (selectedIds.has(key)) return false;
-    const content = section.body;
-    const size = sectionSize(section);
-    if (size > maxSize || used + size > MAX_STAGE2_SECTION_CHARS) return false;
-    selected.push({ section, content });
-    selectedIds.add(key);
-    used += size;
-    return true;
-  };
-  const affectedKinds = report.affected_kinds.filter((kind) =>
-    ordered.some(({ section }) => section.docKind === kind)
-  );
-  const perKindBudget = Math.floor(MAX_STAGE2_SECTION_CHARS / Math.max(affectedKinds.length, 1));
-  for (const kind of affectedKinds) {
-    const ofKind = ordered.filter(({ section }) => section.docKind === kind);
-    const top = ofKind.find(({ section }) => sectionSize(section) <= perKindBudget);
-    if (top) {
-      addSection(top.section, perKindBudget);
-    } else {
-      const fallback = ofKind.find(({ section }) =>
-        sectionSize(section) <= MAX_STAGE2_SECTION_CHARS - used
-      );
-      if (fallback) addSection(fallback.section);
-    }
-  }
-  for (const { section } of ordered) {
-    addSection(section);
-  }
-  return selected;
+interface DocumentContext {
+  docPath: string;
+  docKind: DocKind;
+  sections: DocSection[];
+  promptSections: DocSection[];
 }
 
-function writerSystemPrompt(input: LLMInput, report: ImpactReport): string {
+function documentContexts(input: LLMInput, report: ImpactReport): DocumentContext[] {
+  const priority = new Map(report.affected_kinds.map((kind, index) => [kind, index]));
+  const grouped = new Map<string, DocumentContext>();
+  for (const section of input.sections) {
+    let group = grouped.get(section.docPath);
+    if (!group) {
+      const newGroup: DocumentContext = {
+        docPath: section.docPath,
+        docKind: DOC_KINDS.includes(section.docKind as DocKind)
+          ? section.docKind as DocKind
+          : "other",
+        sections: [],
+        promptSections: [],
+      };
+      grouped.set(section.docPath, newGroup);
+      group = newGroup;
+    }
+    group.sections.push(section);
+  }
+  const orderedGroups = [...grouped.values()]
+    .sort((a, b) =>
+      (priority.get(a.docKind) ?? DOC_KINDS.length) -
+        (priority.get(b.docKind) ?? DOC_KINDS.length)
+    );
+  const selectedGroups: DocumentContext[] = [];
+  for (const kind of report.affected_kinds) {
+    const group = orderedGroups.find((candidate) =>
+      candidate.docKind === kind && !selectedGroups.includes(candidate)
+    );
+    if (group) selectedGroups.push(group);
+  }
+  for (const group of orderedGroups) {
+    if (selectedGroups.length >= MAX_DOCUMENTS) break;
+    if (!selectedGroups.includes(group)) selectedGroups.push(group);
+  }
+  return selectedGroups
+    .map((group) => {
+      let used = 0;
+      const promptSections: DocSection[] = [];
+      for (const section of group.sections) {
+        const remaining = MAX_DOCUMENT_CHARS - used;
+        if (remaining <= 0) break;
+        const body = section.body.length <= remaining
+          ? section.body
+          : `${section.body.slice(0, Math.max(0, remaining - 40))}\n[section context truncated]`;
+        promptSections.push({ ...section, body });
+        used += body.length;
+      }
+      return { ...group, promptSections };
+    });
+}
+
+function writerSystemPrompt(input: LLMInput, report: ImpactReport, docPath: string): string {
+  const group = input.sections[0];
   const kinds = report.affected_kinds.join(", ") || "none";
   return [
     "You are Docline's Documentation Writer. Produce minimal, accurate reviewable documentation patches.",
     `House voice for ${input.productName}: ${input.tone.voice}.`,
     `Person: ${input.tone.person}. Formality (1 casual-5 formal): ${input.tone.formality}.`,
     `Rules: ${input.tone.rules.join("; ")}.`,
+    `Write only the single document ${docPath}${group ? ` (${group.docKind})` : ""}.`,
     `Stage 1 affected_kinds: ${kinds}. Stage 1 documentation_gaps: ${JSON.stringify(report.documentation_gaps)}.`,
     'Return ONLY this JSON schema: {"impactStatement": string, "uncertainties": string[], "testsToRun": string[], "edits": [{"action": "replace"|"append"|"create", "docPath": string, "sectionHeading": string, "content": string, "evidence": string[]}]}',
-    "Produce separate edits for EVERY affected guide (`api`, `developer`, `user`, `other`/README) listed in affected_kinds and documentation_gaps, and every affected section. Do not stop after updating README.md. If an affected guide has no existing section for a documented gap, use action `create` in that guide.",
-    "Use only supplied full sections and changedFiles. Do not use or request the raw diff. For replace/append target a supplied section; for create target a supplied document with a new heading.",
+    "Produce separate edits for EVERY affected section and gap in this document. Do not write edits for any other document.",
+    "Use only supplied section context and changedFiles. Do not use or request the raw diff. For replace/append target a supplied section; for create target a supplied document with a new heading.",
     'For "replace", return the COMPLETE updated section body, preserving all still-accurate paragraphs, numbered steps, screenshots/image links, code blocks, and sub-headings. ONLY modify the specific lines, model names, endpoints, or limits that changed; never delete or summarize away unrelated setup steps or instructions.',
     'For "append", return ONLY the new prose or subsection to add to the end of the existing section; do not repeat the existing section.',
-    'For "create", return the new section body; do not return a "before" field.',
+    'For "create", return the new section body; do not return a "before" field. Create a section for a documented gap when this document has no existing section for it.',
     "Evidence must copy a changedFiles path.",
   ].join("\n");
 }
 
-async function generateProposalFromImpact(
+async function generateProposalForDocument(
   input: LLMInput,
   provider: Provider,
-  report: ImpactReport
+  report: ImpactReport,
+  context: DocumentContext,
+  changed: string[]
 ): Promise<LLMProviderResult> {
-  const files = parseDiff(input.diffText);
-  const sections = stage2Sections(input, report);
-  const basePrompt = {
+  const scopedInput = {
+    ...input,
+    docs: input.docs.filter((doc) => doc.path === context.docPath),
+    sections: context.sections,
+  };
+  const prompt = {
     impactReport: report,
-    changedFiles: changedFiles(files),
-    sections: sections.map(({ section, content }) => ({
-      docPath: section.docPath,
-      docKind: section.docKind,
-      sectionHeading: section.heading,
-      content,
-    })),
+    changedFiles: changed,
+    document: {
+      docPath: context.docPath,
+      docKind: context.docKind,
+      sections: context.promptSections.map((section) => ({
+        sectionHeading: section.heading,
+        content: section.body,
+      })),
+    },
   };
   let correctionRequired: string | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     const response = await requestModel(
       provider,
       input.model,
-      writerSystemPrompt(input, report),
+      writerSystemPrompt(scopedInput, report, context.docPath),
       JSON.stringify({
-        ...basePrompt,
+        ...prompt,
         ...(correctionRequired ? { correctionRequired } : {}),
       })
     );
     if (!response.raw) return rejected(provider, response.reason ?? "empty_model_response");
-    const result = proposalFromOutput(input, provider, response.raw);
+    const result = proposalFromOutput(scopedInput, provider, response.raw);
     if (result.proposal) return result;
     correctionRequired = result.reason ?? "The proposal was invalid. Return corrected JSON.";
   }
   return rejected(provider, `proposal_retry_exhausted: ${correctionRequired ?? "unknown validation error"}`);
 }
 
-async function requestWithRetry(input: LLMInput, provider: Provider): Promise<LLMProviderResult> {
+function auditedAfter(edit: Proposal["edits"][number], section: DocSection | undefined, content: string) {
+  const trimmed = content.trim();
+  if (edit.action === "replace") {
+    const title = section ? headingLine(section) : `## ${edit.sectionHeading}`;
+    return startsWithHeading(trimmed, edit.sectionHeading) ? trimmed : `${title}\n\n${trimmed}`;
+  }
+  if (edit.action === "append") return `${edit.before}\n\n${trimmed}`;
+  return startsWithMarkdownHeading(trimmed) ? trimmed : `## ${edit.sectionHeading}\n\n${trimmed}`;
+}
+
+async function selfAuditProposal(
+  input: LLMInput,
+  provider: Provider,
+  report: ImpactReport,
+  proposal: Proposal,
+  onProgress?: ProgressCallback
+): Promise<Proposal> {
+  const files = parseDiff(input.diffText);
+  const auditedEdits = [...proposal.edits];
+  for (let index = 0; index < proposal.edits.length; index++) {
+    const edit = proposal.edits[index];
+    const section = input.sections.find((candidate) =>
+      candidate.docPath === edit.docPath && candidate.heading === edit.sectionHeading
+    );
+    await onProgress?.(
+      `Pass 3/3: Auditing ${edit.docPath.split("/").pop() ?? edit.docPath} (${index + 1} of ${proposal.edits.length})`
+    );
+    const response = await requestModel(
+      provider,
+      input.model,
+      [
+        "You are Docline's documentation self-auditor.",
+        "Check that the edit preserves all still-valid steps, screenshots, code blocks, and sub-headings; includes exact literal facts required by the ImpactReport for this guide; and follows every supplied house writing rule.",
+        'Return only JSON: {"approved": boolean, "content": string, "reason": string}. If approved, content must be the full section body for replace, only new prose for append, or new section body for create.',
+      ].join("\n"),
+      JSON.stringify({
+        impactReport: report,
+        documentPath: edit.docPath,
+        sectionHeading: edit.sectionHeading,
+        originalSection: section?.body ?? null,
+        edit: { action: edit.action, content: edit.after },
+        writingRules: {
+          voice: input.tone.voice,
+          person: input.tone.person,
+          formality: input.tone.formality,
+          rules: input.tone.rules,
+        },
+      })
+    );
+    if (!response.raw) {
+      console.warn("[docline] Self-audit failed; keeping validated draft:", response.reason);
+      continue;
+    }
+    let audit: { approved?: boolean; content?: string; reason?: string };
+    try {
+      audit = JSON.parse(stripJsonFence(response.raw)) as typeof audit;
+    } catch (error) {
+      console.warn(
+        "[docline] Self-audit returned invalid JSON; keeping validated draft:",
+        error instanceof Error ? error.message : "parse failed"
+      );
+      continue;
+    }
+    if (audit.approved !== true || typeof audit.content !== "string" || !audit.content.trim()) continue;
+    const content = audit.content.trim();
+    if (
+      edit.action === "replace" &&
+      section &&
+      section.body.length > 300 &&
+      content.length < section.body.length * 0.45
+    ) continue;
+    const candidateEdit = { ...edit, after: auditedAfter(edit, section, content) };
+    const candidate: Proposal = {
+      ...proposal,
+      edits: auditedEdits.map((current, currentIndex) =>
+        currentIndex === index ? candidateEdit : current
+      ),
+    };
+    const invalid = validateProposal(candidate, input.docs, files, input.sections);
+    if (!invalid) auditedEdits[index] = candidateEdit;
+  }
+  return { ...proposal, edits: auditedEdits };
+}
+
+async function generateProposalFromImpact(
+  input: LLMInput,
+  provider: Provider,
+  report: ImpactReport,
+  onProgress?: ProgressCallback
+): Promise<LLMProviderResult> {
+  const files = parseDiff(input.diffText);
+  const contexts = documentContexts(input, report);
+  if (contexts.length === 0) return rejected(provider, "no_retrieved_document_sections");
+  const changed = changedFiles(files);
+  const combined: Proposal = {
+    impactStatement: report.technical_summary || "Documentation updates are required.",
+    uncertainties: [],
+    testsToRun: [],
+    edits: [],
+    signals: input.signals,
+    llm: true,
+  };
+  const failures: string[] = [];
+  for (let index = 0; index < contexts.length; index++) {
+    const context = contexts[index];
+    await onProgress?.(
+      `Pass 2/3: Drafting ${context.docPath.split("/").pop() ?? context.docPath} (${index + 1} of ${contexts.length})`
+    );
+    const result = await generateProposalForDocument(
+      input,
+      provider,
+      report,
+      context,
+      changed
+    );
+    if (!result.proposal) {
+      const failure = `${context.docPath}: drafting failed (${result.reason ?? "unknown error"}); review this guide manually.`;
+      failures.push(failure);
+      continue;
+    }
+    combined.edits.push(...result.proposal.edits);
+    combined.uncertainties.push(...result.proposal.uncertainties);
+    combined.testsToRun.push(...result.proposal.testsToRun);
+  }
+  if (combined.edits.length === 0) {
+    return rejected(provider, failures.join(" ") || "no_reviewable_edits");
+  }
+  combined.uncertainties.push(...failures);
+  const invalid = validateProposal(combined, input.docs, files, input.sections);
+  if (invalid) return rejected(provider, `combined_proposal_validation_failed: ${invalid}`);
+  return {
+    proposal: input.thoroughAudit === false
+      ? combined
+      : await selfAuditProposal(input, provider, report, combined, onProgress),
+    reason: null,
+  };
+}
+
+async function requestWithRetry(
+  input: LLMInput,
+  provider: Provider,
+  onProgress?: ProgressCallback
+): Promise<LLMProviderResult> {
   let impact: ImpactReport | LLMProviderResult;
   try {
-    impact = await analyzeImpactReport(input, provider);
+    impact = await analyzeImpactReport(input, provider, onProgress);
   } catch (error) {
     return rejected(provider, `impact_analysis_failed: ${error instanceof Error ? error.message : "unknown error"}`);
   }
   if ("proposal" in impact) return impact;
   try {
-    return await generateProposalFromImpact(input, provider, impact);
+    return await generateProposalFromImpact(input, provider, impact, onProgress);
   } catch (error) {
     return rejected(provider, `proposal_generation_failed: ${error instanceof Error ? error.message : "unknown error"}`);
   }
 }
 
-export async function tryOpenRouter(input: LLMInput): Promise<LLMProviderResult> {
-  return requestWithRetry(input, "openrouter");
+export async function tryOpenRouter(
+  input: LLMInput,
+  onProgress?: ProgressCallback
+): Promise<LLMProviderResult> {
+  return requestWithRetry(input, "openrouter", onProgress);
 }
 
-export async function tryOllama(input: LLMInput): Promise<LLMProviderResult> {
-  return requestWithRetry(input, "ollama");
+export async function tryOllama(
+  input: LLMInput,
+  onProgress?: ProgressCallback
+): Promise<LLMProviderResult> {
+  return requestWithRetry(input, "ollama", onProgress);
 }
 
 /** Local deterministic drafting — always available, evidence-linked. */

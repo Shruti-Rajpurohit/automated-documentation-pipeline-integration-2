@@ -21,7 +21,7 @@ import {
   type Proposal,
   type ToneProfileLite,
 } from "@/lib/pipeline/engine";
-import { tryOllama, tryOpenRouter } from "@/lib/pipeline/llm";
+import { tryOllama, tryOpenRouter, type ProgressCallback } from "@/lib/pipeline/llm";
 import { publishLocalFiles } from "@/lib/pipeline/local-publisher";
 import type { Actor } from "@/lib/identity";
 
@@ -80,6 +80,7 @@ export interface RunInput {
   title?: string;
   deliveryId?: string;
   truncated?: boolean;
+  onProgress?: ProgressCallback;
 }
 
 /**
@@ -118,6 +119,7 @@ export async function runPipeline(
     .from(documents)
     .where(eq(documents.productId, product.id));
 
+  await input.onProgress?.("Preparing release diff");
   let files: ReturnType<typeof parseDiff> = [];
   let parseLimit: string | null = null;
   if (!input.truncated) {
@@ -133,6 +135,7 @@ export async function runPipeline(
   let proposal: Proposal | null = null;
   let providerNote: string | null = null;
   const incompleteInput = Boolean(input.truncated || parseLimit);
+  await input.onProgress?.("Mapping documentation sections");
   if ((input.provider === "openrouter" || input.provider === "ollama") && !incompleteInput) {
     const retrieved = retrieveSections(docs, {
       signals,
@@ -151,14 +154,15 @@ export async function runPipeline(
       signals,
     };
     const result = input.provider === "ollama"
-      ? await tryOllama(modelInput)
-      : await tryOpenRouter(modelInput);
+      ? await tryOllama(modelInput, input.onProgress)
+      : await tryOpenRouter(modelInput, input.onProgress);
     proposal = result.proposal;
     if (!proposal) {
       providerNote = `${input.provider}_fell_back_to_local: ${result.reason ?? "unknown failure"}`;
     }
   }
   if (!proposal) {
+    await input.onProgress?.("Drafting proposal with local engine");
     proposal = buildProposal({
       docs,
       files,
@@ -169,6 +173,7 @@ export async function runPipeline(
     });
   }
 
+  await input.onProgress?.("Validating proposal evidence");
   const invalid = validateProposal(proposal, docs, files);
   const insufficientSignals = !invalid && (!proposal.llm || proposal.edits.length === 0) &&
     !incompleteInput && files.length > 0 && signals.length === 0;
@@ -199,6 +204,7 @@ export async function runPipeline(
   // complete in seconds but keep a realistic, ordered trail.
   const spacing = opts.at ? [35, 31, 26, 22].map((m) => m * 60_000) : [8, 6, 3, 0].map((s) => s * 1000);
 
+  await input.onProgress?.("Saving review session");
   const sessionId = uid();
   await db.insert(sessions).values({
     id: sessionId,

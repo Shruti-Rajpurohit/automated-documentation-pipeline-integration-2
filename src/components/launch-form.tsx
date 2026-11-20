@@ -77,6 +77,7 @@ export function LaunchForm({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [step, setStep] = useState(0);
+  const [jobStage, setJobStage] = useState("Queueing pipeline run");
   const refsKey = product ? `${product.id}:${source}` : "";
   const refs = refsResult.key === refsKey ? refsResult.refs : [];
   const loadingRefs = source !== "manual" && Boolean(product) && refsResult.key !== refsKey;
@@ -147,6 +148,7 @@ export function LaunchForm({
     setError("");
     setRunning(true);
     setStep(0);
+    setJobStage("Queueing pipeline run");
     const timer = setInterval(() => setStep((current) => Math.min(current + 1, STEPS.length - 1)), 650);
     try {
       const response = await fetch("/api/runs", {
@@ -168,6 +170,7 @@ export function LaunchForm({
       if (!response.ok || typeof result.jobId !== "string") {
         throw new Error(result.error ?? "Could not queue pipeline run.");
       }
+      setJobStage("Queued for pipeline worker");
       while (true) {
         await new Promise((resolve) => setTimeout(resolve, 1_500));
         const jobResponse = await fetch(`/api/jobs/${encodeURIComponent(result.jobId)}`, {
@@ -176,6 +179,7 @@ export function LaunchForm({
         });
         const job = await jobResponse.json();
         if (!jobResponse.ok) throw new Error(job.error ?? "Could not check pipeline run status.");
+        if (typeof job.result?.stage === "string") setJobStage(job.result.stage);
         if (job.status === "COMPLETED") {
           if (typeof job.result?.sessionId !== "string") {
             throw new Error("Pipeline job completed without returning a session.");
@@ -200,6 +204,7 @@ export function LaunchForm({
       <div className="card mx-auto mt-16 max-w-lg p-8 text-center">
         <LoaderCircle size={22} className="mx-auto mb-4 animate-spin text-mint" />
         <div className="mb-5 text-[15px] font-medium text-snow">Pipeline running</div>
+        <div aria-live="polite" className="mb-5 font-mono text-[12px] text-mint">{jobStage}</div>
         <ol className="space-y-2.5 text-left">
           {STEPS.map((item, index) => (
             <li key={item} className={cx("font-mono text-[12px]", index <= step ? "text-mint" : "text-fog/50")}>{index + 1}. {item}</li>
