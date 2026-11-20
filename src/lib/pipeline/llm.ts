@@ -61,7 +61,7 @@ interface ImpactReport {
 
 const DOC_KINDS: DocKind[] = ["api", "developer", "user", "blog", "other"];
 const MAX_ANALYSIS_DIFF_CHARS = 30_000;
-const MAX_STAGE2_SECTION_CHARS = 18_000;
+const MAX_STAGE2_SECTION_CHARS = 28_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 
 function rejected(provider: "openrouter" | "ollama", reason: string): LLMProviderResult {
@@ -146,6 +146,16 @@ function proposalFromOutput(
       return rejected(provider, `unmatched_section: ${edit.docPath} / ${edit.sectionHeading}`);
     }
     const content = edit.content.trim();
+    if (
+      action === "replace" &&
+      section!.body.length > 300 &&
+      content.length < section!.body.length * 0.45
+    ) {
+      return rejected(
+        provider,
+        "replace_too_destructive: replace must preserve unchanged steps, screenshots, and sub-headings — use append or return the full updated section"
+      );
+    }
     const titleLine = section ? headingLine(section) : `## ${edit.sectionHeading}`;
     const before = action === "create" ? "" : section!.body;
     const after = action === "replace"
@@ -313,6 +323,7 @@ function impactSystemPrompt(): string {
     "You are Docline's Impact Analyst. Analyze a release diff and its documentation section index.",
     'Return only JSON with keys: {"decision":"update_required"|"no_update"|"human_investigation","technical_summary":string,"user_impact":string,"documentation_gaps":string[],"affected_kinds":("api"|"developer"|"user"|"blog"|"other")[]}.',
     "List specific documentation gaps by guide in documentation_gaps. Include every document kind that needs an update in affected_kinds. Do not invent implementation details.",
+    "Preserve exact literal strings from diffText in technical_summary and documentation_gaps, especially model IDs, API route paths, HTTP methods, request/response field names, environment variables, and numeric limits (for example, exactly 3 images).",
   ].join("\n");
 }
 
@@ -362,16 +373,17 @@ function stage2Sections(input: LLMInput, report: ImpactReport): {
   const selected: { section: DocSection; content: string }[] = [];
   const selectedIds = new Set<string>();
   let used = 0;
+  const sectionSize = (section: DocSection) => JSON.stringify({
+    docPath: section.docPath,
+    docKind: section.docKind,
+    sectionHeading: section.heading,
+    content: section.body,
+  }).length;
   const addSection = (section: DocSection, maxSize = MAX_STAGE2_SECTION_CHARS - used) => {
     const key = `${section.docPath}\0${section.heading}`;
     if (selectedIds.has(key)) return false;
     const content = section.body;
-    const size = JSON.stringify({
-      docPath: section.docPath,
-      docKind: section.docKind,
-      sectionHeading: section.heading,
-      content,
-    }).length;
+    const size = sectionSize(section);
     if (size > maxSize || used + size > MAX_STAGE2_SECTION_CHARS) return false;
     selected.push({ section, content });
     selectedIds.add(key);
@@ -383,16 +395,16 @@ function stage2Sections(input: LLMInput, report: ImpactReport): {
   );
   const perKindBudget = Math.floor(MAX_STAGE2_SECTION_CHARS / Math.max(affectedKinds.length, 1));
   for (const kind of affectedKinds) {
-    const top = ordered.find(({ section }) =>
-      section.docKind === kind &&
-      JSON.stringify({
-        docPath: section.docPath,
-        docKind: section.docKind,
-        sectionHeading: section.heading,
-        content: section.body,
-      }).length <= perKindBudget
-    );
-    if (top) addSection(top.section, perKindBudget);
+    const ofKind = ordered.filter(({ section }) => section.docKind === kind);
+    const top = ofKind.find(({ section }) => sectionSize(section) <= perKindBudget);
+    if (top) {
+      addSection(top.section, perKindBudget);
+    } else {
+      const fallback = ofKind.find(({ section }) =>
+        sectionSize(section) <= MAX_STAGE2_SECTION_CHARS - used
+      );
+      if (fallback) addSection(fallback.section);
+    }
   }
   for (const { section } of ordered) {
     addSection(section);
@@ -411,7 +423,10 @@ function writerSystemPrompt(input: LLMInput, report: ImpactReport): string {
     'Return ONLY this JSON schema: {"impactStatement": string, "uncertainties": string[], "testsToRun": string[], "edits": [{"action": "replace"|"append"|"create", "docPath": string, "sectionHeading": string, "content": string, "evidence": string[]}]}',
     "Produce separate edits for EVERY affected guide (`api`, `developer`, `user`, `other`/README) listed in affected_kinds and documentation_gaps, and every affected section. Do not stop after updating README.md. If an affected guide has no existing section for a documented gap, use action `create` in that guide.",
     "Use only supplied full sections and changedFiles. Do not use or request the raw diff. For replace/append target a supplied section; for create target a supplied document with a new heading.",
-    "Do not return before or repeat unchanged prose. Return only replacement or appended prose in content. Evidence must copy a changedFiles path.",
+    'For "replace", return the COMPLETE updated section body, preserving all still-accurate paragraphs, numbered steps, screenshots/image links, code blocks, and sub-headings. ONLY modify the specific lines, model names, endpoints, or limits that changed; never delete or summarize away unrelated setup steps or instructions.',
+    'For "append", return ONLY the new prose or subsection to add to the end of the existing section; do not repeat the existing section.',
+    'For "create", return the new section body; do not return a "before" field.',
+    "Evidence must copy a changedFiles path.",
   ].join("\n");
 }
 
