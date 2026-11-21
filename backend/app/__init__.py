@@ -1,1 +1,0 @@
-"""Automated documentation pipeline service."""

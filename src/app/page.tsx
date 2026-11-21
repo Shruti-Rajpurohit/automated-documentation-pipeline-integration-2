@@ -5,6 +5,7 @@ import { db } from "@/db";
 import { auditEvents, documentEdits, documents, products, sessions, users } from "@/db/schema";
 import { ensureWorkspaceBootstrap } from "@/lib/seed";
 import { PageHeader } from "@/components/page-header";
+import { ActiveJobs } from "@/components/active-jobs";
 import { PipelineFlow } from "@/components/pipeline-flow";
 import { Avatar, Counter, Reveal, StatusChip } from "@/components/ui";
 import { relativeTime } from "@/lib/time";
@@ -116,6 +117,7 @@ export default async function OverviewPage() {
 
   return (
     <div>
+      <ActiveJobs />
       <PageHeader
         kicker="workspace"
         title="Documentation that keeps up with the code."

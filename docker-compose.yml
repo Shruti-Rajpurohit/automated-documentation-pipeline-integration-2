@@ -1,12 +1,4 @@
-# One command, whole product:  docker compose up --build
-#
-#   web :3000  ─ trusted proxy ─►  api :8000 (loopback-only publish)
-#     │                              │
-#  Postgres ◄── Drizzle          SQLite (volume: api-data)
-#  (loopback-only)
-#
-# The Python service and Postgres are never published beyond loopback: the
-# Next.js server is the only public surface and brokers identity to both.
+# Unified Next.js + PostgreSQL deployment: docker compose up --build
 
 services:
   db:
@@ -26,42 +18,11 @@ services:
       timeout: 3s
       retries: 12
 
-  api:
-    build: ./backend
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: sqlite+aiosqlite:////data/documentation_pipeline.db
-      QUEUE_DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/app_db
-      APP_ENV: production
-      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?set AUTH_PROXY_SECRET in .env}
-      REPOSITORY_ROOTS: /srv/repos
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-ollama}
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
-      WEBHOOK_USER_ID: ${WEBHOOK_USER_ID:-1}
-      OLLAMA_URL: ${OLLAMA_URL:-http://127.0.0.1:11434}
-      OLLAMA_URL_ALLOWLIST: ${OLLAMA_URL_ALLOWLIST:-}
-      SOURCE_REPO_PATH: ${SOURCE_REPO_PATH:-}
-      DOCS_REPO_PATH: ${DOCS_REPO_PATH:-}
-      PIPELINE_USE_GLOBAL_CONTEXT: ${PIPELINE_USE_GLOBAL_CONTEXT:-}
-      PIPELINE_MAX_PROMPT_CHARS: ${PIPELINE_MAX_PROMPT_CHARS:-200000}
-    volumes:
-      - api-data:/data
-      - ./repos:/srv/repos
-    ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-
   web:
     build: .
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/app_db
-      PIPELINE_BACKEND_URL: http://api:8000
-      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?set AUTH_PROXY_SECRET in .env}
       DOCLINE_SESSION_SECRET: ${DOCLINE_SESSION_SECRET:?set DOCLINE_SESSION_SECRET in .env}
       DOCLINE_AUTH_MODE: ${DOCLINE_AUTH_MODE:-sso}
       SSO_PROXY_SECRET: ${SSO_PROXY_SECRET:-}
@@ -72,15 +33,22 @@ services:
       ENFORCE_SEPARATION_OF_DUTIES: ${ENFORCE_SEPARATION_OF_DUTIES:-false}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-300000}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFICATION_FROM_EMAIL: ${NOTIFICATION_FROM_EMAIL:-}
+      NOTIFICATION_EMAIL: ${NOTIFICATION_EMAIL:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       DOCLINE_DEMO_MODE: ${DOCLINE_DEMO_MODE:-}
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
-      api:
-        condition: service_started
 
 volumes:
   docline-pgdata:
-  api-data:

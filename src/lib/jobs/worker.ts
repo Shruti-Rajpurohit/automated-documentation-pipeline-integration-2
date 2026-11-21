@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
 import { db, pool } from "@/db";
-import { users } from "@/db/schema";
+import { products, sessions, users } from "@/db/schema";
 import type { Actor } from "@/lib/identity";
 import { runPipeline, serverActorByRole } from "@/lib/actions";
+import { notifyRunComplete } from "@/lib/notifications";
 
 type QueueRow = {
   id: string;
@@ -89,6 +90,7 @@ async function executeJob(job: QueueRow): Promise<{ sessionId: string; status: s
       actor,
       title: typeof payload.title === "string" ? payload.title : undefined,
       truncated: payload.truncated === true,
+      auditMode: payload.auditMode === "deep" ? "deep" : "standard",
       onProgress: reportJobProgress(job.id),
     });
   }
@@ -113,6 +115,40 @@ async function executeJob(job: QueueRow): Promise<{ sessionId: string; status: s
     truncated: payload.truncated === true,
     onProgress: reportJobProgress(job.id),
   });
+}
+
+async function sendCompletionNotification(
+  job: QueueRow,
+  result: { sessionId: string; status: string }
+): Promise<void> {
+  try {
+    const [session] = await db
+      .select({
+        title: sessions.title,
+        productName: products.name,
+      })
+      .from(sessions)
+      .leftJoin(products, eq(sessions.productId, products.id))
+      .where(eq(sessions.id, result.sessionId));
+    if (!session) throw new Error("Completed pipeline session was not found for notification.");
+    const actorId = typeof job.payload.actorId === "string" ? job.payload.actorId : null;
+    const [actor] = actorId
+      ? await db.select({ email: users.email }).from(users).where(eq(users.id, actorId))
+      : [];
+    const baseUrl = (process.env.APP_BASE_URL || "http://localhost:3000").replace(/\/+$/, "");
+    await notifyRunComplete({
+      toEmail: actor?.email,
+      productName: session.productName || "Docline",
+      title: session.title,
+      status: result.status,
+      sessionUrl: `${baseUrl}/sessions/${encodeURIComponent(result.sessionId)}`,
+    });
+  } catch (error) {
+    console.error("[docline] run completion notification failed", {
+      jobId: job.id,
+      error: error instanceof Error ? error.message : "unknown notification error",
+    });
+  }
 }
 
 async function runWorker(): Promise<void> {
@@ -154,6 +190,7 @@ async function runWorker(): Promise<void> {
          WHERE id = $1`,
         [job.id, JSON.stringify(result)]
       );
+      await sendCompletionNotification(job, result);
     } catch (error) {
       const errorType = error instanceof Error ? error.name : "unknown";
       const errorMessage = error instanceof Error ? error.message : "Unknown job execution error";

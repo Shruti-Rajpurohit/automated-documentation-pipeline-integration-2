@@ -479,7 +479,14 @@ export function retrieveSections(
   for (const kind of kindsPresent) {
     const ofKind = candidates.filter(({ section }) => section.docKind === kind);
     const top = ofKind.find(({ section }) => section.body.length <= kindBudget);
-    if (top) addCandidate(top, kindBudget);
+    if (top) {
+      addCandidate(top, kindBudget);
+    } else {
+      const fallback = ofKind.find(({ section }) =>
+        section.body.length <= maxChars - usedChars
+      );
+      if (fallback) addCandidate(fallback);
+    }
   }
   for (const candidate of candidates) {
     if (candidate.score > 0) addCandidate(candidate);

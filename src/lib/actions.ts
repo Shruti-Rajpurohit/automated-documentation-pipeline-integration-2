@@ -80,6 +80,7 @@ export interface RunInput {
   title?: string;
   deliveryId?: string;
   truncated?: boolean;
+  auditMode?: "standard" | "deep";
   onProgress?: ProgressCallback;
 }
 
@@ -152,6 +153,7 @@ export async function runPipeline(
       docs,
       sections: retrieved,
       signals,
+      thoroughAudit: input.auditMode === "deep",
     };
     const result = input.provider === "ollama"
       ? await tryOllama(modelInput, input.onProgress)
@@ -291,8 +293,8 @@ export async function editDraft(input: {
 }) {
   const actor = input.actor;
   if (!actor) return { ok: false as const, error: "Authentication required." };
-  if (actor.role !== "WRITER" && actor.role !== "REVIEWER") {
-    return { ok: false as const, error: "Only Writers and Reviewers can edit drafts." };
+  if (!["WRITER", "REVIEWER", "APPROVER"].includes(actor.role)) {
+    return { ok: false as const, error: "Only Writers, Reviewers, and Approvers can edit drafts." };
   }
   const [session] = await db
     .select({ id: sessions.id, status: sessions.status })

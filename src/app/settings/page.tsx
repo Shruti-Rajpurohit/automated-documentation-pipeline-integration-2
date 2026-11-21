@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 const MATRIX: { action: string; WRITER: boolean; REVIEWER: boolean; APPROVER: boolean }[] = [
   { action: "Create pipeline run", WRITER: true, REVIEWER: true, APPROVER: true },
-  { action: "Edit proposed drafts", WRITER: true, REVIEWER: true, APPROVER: false },
+  { action: "Edit proposed drafts", WRITER: true, REVIEWER: true, APPROVER: true },
   { action: "Approve proposal", WRITER: false, REVIEWER: true, APPROVER: true },
   { action: "Reject with reason", WRITER: false, REVIEWER: true, APPROVER: true },
   { action: "Publish approved changes", WRITER: false, REVIEWER: true, APPROVER: true },
@@ -16,7 +16,6 @@ const MATRIX: { action: string; WRITER: boolean; REVIEWER: boolean; APPROVER: bo
 
 export default function SettingsPage() {
   const openrouter = Boolean(process.env.OPENROUTER_API_KEY);
-  const backendUrl = process.env.PIPELINE_BACKEND_URL ?? "";
   const curl = `curl -X POST $HOST/api/runs \\
   -H "content-type: application/json" \\
   -H "authorization: Bearer $PIPELINE_API_TOKEN" \\
@@ -140,35 +139,6 @@ export default function SettingsPage() {
               </p>
             </div>
 
-            <div className="mt-4 border-t border-hairline pt-4">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-[13px] font-medium text-snow">Python pipeline service</div>
-                <span
-                  className={
-                    backendUrl
-                      ? "rounded-full border border-mint/30 bg-mint-dim px-2 py-0.5 font-mono text-[10px] text-mint"
-                      : "rounded-full border border-hairline-2 px-2 py-0.5 font-mono text-[10px] text-fog"
-                  }
-                >
-                  {backendUrl ? "linked" : "not linked"}
-                </span>
-              </div>
-              <p className="text-[12px] leading-relaxed text-fog">
-                The FastAPI service in <span className="font-mono text-[10.5px]">backend/</span>{" "}
-                runs alongside this app (                git-native repos on disk, a separate SQLite review store, and Ollama/OpenRouter
-                drafting). This server is its trusted proxy: requests to{" "}
-                <code className="rounded bg-white/[0.05] px-1 py-px font-mono text-[10.5px] text-snow/80">
-                  /api/backend/sessions
-                </code>{" "}
-                are forwarded with{" "}
-                <span className="font-mono text-[10.5px]">X-Auth-Proxy-Secret</span> injected
-                server-side. Link it with{" "}
-                <span className="font-mono text-[10.5px]">PIPELINE_BACKEND_URL</span>
-                {backendUrl ? " — configured (upstream address withheld from the UI)." : ""}
-                . One-command deployment for both tiers:{" "}
-                <span className="font-mono text-[10.5px]">docker compose up --build</span>.
-              </p>
-            </div>
           </div>
         </Reveal>
 

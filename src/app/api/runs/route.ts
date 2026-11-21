@@ -44,6 +44,7 @@ export async function POST(req: Request) {
       diffText: (body.diffText as string).slice(0, 250_000),
       truncated: (body.diffText as string).length > 250_000,
       triggerType: typeof body.triggerType === "string" ? body.triggerType : "MANUAL",
+      auditMode: body.auditMode === "deep" ? "deep" as const : "standard" as const,
       actor,
       title: typeof body.title === "string" && body.title ? body.title : undefined,
     };
@@ -62,6 +63,7 @@ export async function POST(req: Request) {
           model: runInput.model,
           diffText: runInput.diffText,
           triggerType: runInput.triggerType,
+          auditMode: runInput.auditMode,
           actorId: actor.id,
           title: runInput.title,
           truncated: runInput.truncated,

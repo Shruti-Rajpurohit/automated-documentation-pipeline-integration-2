@@ -18,6 +18,7 @@ export interface LaunchProduct {
 
 type SourceMode = "local" | "github" | "manual";
 type Provider = "local" | "ollama" | "openrouter";
+type AuditMode = "standard" | "deep";
 
 function configuredProvider(value: string | undefined): Provider {
   return value === "ollama" || value === "openrouter" ? value : "local";
@@ -78,6 +79,7 @@ export function LaunchForm({
   const [error, setError] = useState("");
   const [step, setStep] = useState(0);
   const [jobStage, setJobStage] = useState("Queueing pipeline run");
+  const [auditMode, setAuditMode] = useState<AuditMode>("standard");
   const refsKey = product ? `${product.id}:${source}` : "";
   const refs = refsResult.key === refsKey ? refsResult.refs : [];
   const loadingRefs = source !== "manual" && Boolean(product) && refsResult.key !== refsKey;
@@ -149,6 +151,25 @@ export function LaunchForm({
     setRunning(true);
     setStep(0);
     setJobStage("Queueing pipeline run");
+    let notificationPermission: NotificationPermission | undefined;
+    if ("Notification" in window) {
+      notificationPermission = Notification.permission;
+      if (notificationPermission === "default") {
+        try {
+          notificationPermission = await Notification.requestPermission();
+        } catch {
+          notificationPermission = "denied";
+        }
+      }
+    }
+    const notify = (title: string, body: string, sessionId?: string) => {
+      if (notificationPermission !== "granted" || !("Notification" in window)) return;
+      const notification = new Notification(title, { body });
+      notification.onclick = () => {
+        window.focus();
+        if (sessionId) router.push(`/sessions/${sessionId}`);
+      };
+    };
     const timer = setInterval(() => setStep((current) => Math.min(current + 1, STEPS.length - 1)), 650);
     try {
       const response = await fetch("/api/runs", {
@@ -164,6 +185,7 @@ export function LaunchForm({
           diffText,
           triggerType: "MANUAL",
           async: true,
+          auditMode,
         }),
       });
       const result = await response.json();
@@ -184,15 +206,19 @@ export function LaunchForm({
           if (typeof job.result?.sessionId !== "string") {
             throw new Error("Pipeline job completed without returning a session.");
           }
+          notify("Docline run completed", `${product.name}: review is ready.`, job.result.sessionId);
           router.push(`/sessions/${job.result.sessionId}`);
           return;
         }
         if (job.status === "FAILED") {
-          throw new Error(job.lastError || "Pipeline run failed.");
+          const message = job.lastError || "Pipeline run failed.";
+          throw new Error(message);
         }
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Pipeline run failed.");
+      const message = reason instanceof Error ? reason.message : "Pipeline run failed.";
+      if (notificationPermission === "granted") notify("Docline run failed", message);
+      setError(message);
       setRunning(false);
     } finally {
       clearInterval(timer);
@@ -284,6 +310,27 @@ export function LaunchForm({
               <input value={model} onChange={(event) => setModel(event.target.value)} className={`${input} mt-2`} placeholder={provider === "ollama" ? "custom Ollama model" : "provider/model"} />
             </>
           )}
+          <div className="mt-4">
+            <div className="mb-2 text-[11px] text-fog">Audit depth</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setAuditMode("standard")}
+                aria-pressed={auditMode === "standard"}
+                className={cx(card, auditMode === "standard" && "border-mint/40 bg-mint-dim/40")}
+              >
+                <span className="block text-[12px] font-medium text-snow">Standard (2-pass, faster)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuditMode("deep")}
+                aria-pressed={auditMode === "deep"}
+                className={cx(card, auditMode === "deep" && "border-mint/40 bg-mint-dim/40")}
+              >
+                <span className="block text-[12px] font-medium text-snow">Deep Audit (3-pass, thorough)</span>
+              </button>
+            </div>
+          </div>
         </section>
         {error && <p role="alert" className="text-[12px] text-coral">{error}</p>}
         <button onClick={submit} disabled={!product || !diffText.trim()} className="inline-flex items-center gap-2 rounded-xl bg-mint px-5 py-2.5 text-[14px] font-semibold text-ink disabled:opacity-40">Run pipeline <ArrowRight size={15} /></button>

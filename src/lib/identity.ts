@@ -15,7 +15,7 @@ import { users } from "@/db/schema";
  * - sso (DOCLINE_AUTH_MODE=sso): identity arrives from the customer's SSO
  *   proxy as X-Authenticated-User (email) + X-Auth-Proxy-Secret, validated
  *   against SSO_PROXY_SECRET with a constant-time compare — the same trust
- *   model the FastAPI tier uses. The demo picker is disabled.
+ *   model used for workspace role assignment. The demo picker is disabled.
  *
  * Unauthenticated calls to mutating routes get 401. Read routes stay open.
  */

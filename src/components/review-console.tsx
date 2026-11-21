@@ -14,6 +14,7 @@ import {
   Rocket,
   ShieldCheck,
   Sparkles,
+  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -103,6 +104,7 @@ export function ReviewConsole({
 
   const canDecide = role === "REVIEWER" || role === "APPROVER";
   const stale = edits.some((e) => e.currentVersion !== e.docVersion);
+  const deletable = ["NEEDS_INVESTIGATION", "NO_UPDATE", "REJECTED", "AWAITING_REVIEW"].includes(session.status);
 
   async function act(action: "approve" | "reject" | "publish", payload?: string) {
     setBusy(action);
@@ -150,8 +152,28 @@ export function ReviewConsole({
     }
   }
 
+  async function deleteSession() {
+    if (!window.confirm("Delete this session, its proposed edits, and its audit history? This cannot be undone.")) return;
+    setBusy("delete");
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${session.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null) as { error?: string } | null;
+        setError(json?.error ?? "Could not delete session.");
+        return;
+      }
+      router.push("/");
+      router.refresh();
+    } catch {
+      setError("Network error. Try again.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const status = session.status;
-  const canEdit = (role === "WRITER" || role === "REVIEWER") && status === "AWAITING_REVIEW";
+  const canEdit = (role === "WRITER" || role === "REVIEWER" || role === "APPROVER") && status === "AWAITING_REVIEW";
 
   return (
     <div>
@@ -189,6 +211,16 @@ export function ReviewConsole({
         </div>
 
         <div className="flex items-center gap-2">
+          {deletable && (
+            <button
+              onClick={deleteSession}
+              disabled={busy !== null}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-coral/30 px-3 py-2 text-[12px] font-medium text-coral hover:bg-coral/10 disabled:opacity-40"
+            >
+              {busy === "delete" ? <LoaderCircle size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              Delete session
+            </button>
+          )}
           {status === "AWAITING_REVIEW" && (
             <>
               <button

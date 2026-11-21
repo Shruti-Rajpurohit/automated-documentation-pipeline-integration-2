@@ -117,8 +117,7 @@ the route fails closed with 503 when the secret is unset), maps the pushed
 repository to a product via its configured repo URL, resolves the
 `before...after` compare diff from the GitHub API itself, and durably queues the
 same pipeline in PostgreSQL. The response carries `{ status, jobId, jobStatus }`.
-Poll `GET /api/jobs/{jobId}` for status and the resulting session. The Python
-service exposes its queue status through `GET /api/backend/jobs/{jobId}`.
+Poll `GET /api/jobs/{jobId}` for status and the resulting session.
 
 Optional environment: `GITHUB_TOKEN` for private repositories and
 `GITHUB_API_BASE` for GitHub Enterprise. Webhook runs use the product's
@@ -162,13 +161,9 @@ src/lib/pipeline/local-publisher.ts  guarded local-disk publication
 src/app/api/runs            POST: run the pipeline
 src/app/api/webhooks/github POST: verified GitHub push → durable job queue
 src/app/api/jobs             GET: authenticated TypeScript job status
-src/app/api/backend/[...path] trusted-proxy bridge to the Python service
-src/app/api/sessions/[id]   actions (approve/reject/publish), edit (draft edits)
+src/app/api/sessions/[id]   delete, actions (approve/reject/publish), edit
 src/app/...                 dashboard, new run, review console, docs, activity, settings
-backend/app/                FastAPI pipeline service (analyzer, finder,
-                            patch writer, review persistence, webhooks)
-backend/tests/              Python test suite (python -m unittest discover)
-Dockerfile / backend/Dockerfile · docker-compose.yml · drizzle.config.ts
+Dockerfile · docker-compose.yml · drizzle.config.ts
 ```
 
 ## Troubleshooting
@@ -180,127 +175,54 @@ Dockerfile / backend/Dockerfile · docker-compose.yml · drizzle.config.ts
   `npx drizzle-kit migrate`.
 - First build downloads web fonts once (cached afterwards); builds offline after that.
 
-## Architecture — two tiers, one product
+## Architecture — unified application
 
 ```
-                 ┌──────────────────────────────┐
- browser / CI ──►│  Next.js  (this app, :3000)  │── PostgreSQL (Drizzle + jobs)
-  one origin     │  dashboard · TS pipeline ·   │
-                 │  review console · audit      │
-                 └──────────────┬───────────────┘
-                                │ trusted proxy:
-                                │ /api/backend/* injects
-                                │ X-Authenticated-User-ID +
-                                │ X-Auth-Proxy-Secret
-                                ▼
-                 ┌──────────────────────────────┐
-                 │ FastAPI  (backend/, :8000)  │── SQLite review store
-                 │  git-native diff analysis ·  │── product/docs git
-                 │  Ollama / OpenRouter drafts  │   checkouts on disk
-                 │  PostgreSQL job queue       │── PostgreSQL
-                 └──────────────────────────────┘
+ browser / CI ──► Next.js 16 · TypeScript ── PostgreSQL
+                   dashboard, pipeline,       Drizzle, sessions,
+                   review, jobs, API            and durable queue
 ```
 
-**Web tier (Next.js 16 + PostgreSQL)** — the dashboard, review console, docs
-tree, roles, audit trail, plus a self-contained TypeScript pipeline
-(`src/lib/pipeline/`) that works from pasted diffs or verified GitHub
-webhooks. It can serve clients entirely on its own.
-
-**Pipeline service (`backend/` — FastAPI + SQLite + Ollama/OpenRouter)** — the
-original Python service, vendored in and productionized: it compares two
-revisions of a real git checkout, scans a documentation working tree on disk,
-drafts evidence-linked patches with a local or hosted model, and persists
-review sessions with role-gated approve/reject. Use it for enterprise
-customers whose compliance teams require analysis to run against their own
-source trees without code ever leaving their network.
-
-They integrate through `/api/backend/*`: the Next.js server is the
-**trusted proxy** the FastAPI service is designed for — it strips
-client-supplied identity and injects `X-Authenticated-User-ID` /
-`X-Auth-Proxy-Secret` server-side (secret never reaches the browser). The
-dashboard role switcher maps to provisioned backend users via
-`BACKEND_USER_MAP` (default `{"WRITER":1,"REVIEWER":2,"APPROVER":3}`).
-
-Module mapping between the tiers (the TS engine mirrors the Python contract):
-
-| FastAPI service            | Here                                     |
-| -------------------------- | ---------------------------------------- |
-| analyzer / diff parsing    | `src/lib/pipeline/engine.ts`             |
-| Ollama/OpenRouter clients  | `src/lib/pipeline/llm.ts` (+ local engine) |
-| session/review endpoints   | `src/app/api/runs`, `src/app/api/sessions/[id]/*` |
-| SQLite review models       | backend database (separate from web tier) |
-| trusted-proxy auth headers | `src/app/api/backend/[...path]/route.ts` |
-| Next.js dashboard          | `src/app/*` (this app)                   |
+Docline is a single Next.js + PostgreSQL application. The TypeScript pipeline
+handles diff parsing, section retrieval, model-assisted drafting, validation,
+review sessions, publication, and durable background jobs in one service.
+Ollama and OpenRouter are optional drafting providers; PostgreSQL is the
+application's only database.
 
 ## Deploy — Docker Compose (one command)
 
 ```bash
-cp .env.example .env        # set required secrets, POSTGRES_PASSWORD, SSO_PROXY_SECRET, and GITHUB_TOKEN
+  cp .env.example .env        # set required secrets, POSTGRES_PASSWORD, SSO_PROXY_SECRET, and GITHUB_TOKEN
 docker compose up --build
 ```
 
-Generate deployment secrets rather than using the placeholders in `.env.example`
-(for example, `openssl rand -hex 32`); set the same `AUTH_PROXY_SECRET` for web
-and API, configure `SSO_PROXY_SECRET` to match the trusted identity proxy, and
-set `POSTGRES_PASSWORD` consistently with the Compose database URL. Compose
-defaults to SSO mode; only set `DOCLINE_AUTH_MODE=demo` and
+  Generate deployment secrets rather than using the placeholders in `.env.example`
+  (for example, `openssl rand -hex 32`); configure `SSO_PROXY_SECRET` to match
+  your trusted identity proxy, and set `POSTGRES_PASSWORD` consistently with the
+  Compose database URL. Compose defaults to SSO mode; only set `DOCLINE_AUTH_MODE=demo` and
 `DOCLINE_DEMO_MODE=1` for isolated evaluation deployments.
-The web `users` table must contain the SSO users and roles before they sign in;
-the Python identities are provisioned separately.
-
-- **web** on `:3000` — Next.js; creates/upgrades Postgres tables on boot.
-- **api** on `127.0.0.1:8000` — FastAPI; loopback-only publish by design
-  (clients never reach it directly; the trusted proxy does). Provisions the
-  three review identities on boot. Mount product + docs git checkouts into
-  `./repos` (both must live under `REPOSITORY_ROOTS=/srv/repos`).
-- **db** on `127.0.0.1:5433` by default (container port `5432`) — PostgreSQL
-  for the web tier and both durable job queues.
-- Configure each product's docs repository and root through **Products** before production
-  publishing. The Python queue worker is enabled by `QUEUE_DATABASE_URL`, which
-  Compose points at this same PostgreSQL service.
+  Provision SSO users and roles in the web `users` table before they sign in.
+  Compose runs **web** on `:3000` and PostgreSQL on loopback port `5433` by
+  default. Configure each product's docs repository and root through **Products**
+  before production publishing.
 
 **Operational responsibilities:** keep each installation isolated as a
-single-tenant deployment, back up PostgreSQL and the Python SQLite data volume,
-and define retention for completed/failed jobs and review records. Jobs retry
-up to five times and recover expired worker leases; completion notifications
-are not sent, so consumers should poll the job-status endpoints. Suggested
-documentation checks are recorded for reviewers but are not executed by the
-pipeline; configure required checks in the documentation repository's PR
-settings.
+  single-tenant deployment, back up PostgreSQL, and define retention for
+  completed/failed jobs and review records. Jobs retry up to five times and
+  recover expired worker leases. Optional completion notifications can use
+  Resend and Slack; configure them with the variables in `.env.example`.
+  Suggested documentation checks are recorded for reviewers but are not
+  executed by the pipeline; configure required checks in the documentation
+  repository's PR settings.
 
-Talk to the Python tier through the proxy:
+  **Production topology:** put the web service behind your TLS terminator/SSO
+  proxy (`DOCLINE_AUTH_MODE=sso` + `SSO_PROXY_SECRET`), set strong
+  `GITHUB_WEBHOOK_SECRET` and `DOCLINE_SESSION_SECRET` values, and provision
+  real users. Schema changes ship as reviewed SQL files in `drizzle/` (applied
+  with `drizzle-kit migrate`; the dev-only `push --force` is never run in
+  containers). Air-gapped installs can use the deterministic local engine or a
+  pinned on-device Ollama model.
 
-The bridge requires a Docline session (cookie above); the backend user is
-derived from the signed-in user's database role — no client-chosen roles.
-
-```bash
-curl -b cookies.txt http://localhost:3000/api/backend/healthz
-curl -b cookies.txt -X POST http://localhost:3000/api/backend/sessions \
-  -H "content-type: application/json" \
-  -d '{
-    "source_repo": "/srv/repos/my-product",
-    "docs_repo": "/srv/repos/my-product-docs",
-    "base_revision": "v1.2.0",
-    "head_revision": "v1.3.0",
-    "model_name": "qwen2.5-coder:7b",
-    "provider": "ollama"
-  }'
-```
-
-**Production topology:** put `web` behind your TLS terminator/SSO proxy (set
-`DOCLINE_AUTH_MODE=sso` + `SSO_PROXY_SECRET`), keep `api` unpublished (compose
-already binds it to loopback), set strong `AUTH_PROXY_SECRET` /
-`GITHUB_WEBHOOK_SECRET` / `DOCLINE_SESSION_SECRET`, and provision real users
-with `python -m app.db.provision_user`. House style is per-project:
-`python -m app.db.provision_project` or a `PROJECT_CONTEXT.md` at the checkout
-root (auto-registers on first run). Schema changes ship as reviewed SQL files
-in `drizzle/` (applied on boot with `drizzle-kit migrate`; the dev-only
-`push --force` is never run in containers). Air-gapped installs: run the TS
-local engine, or the Python tier with a pinned Ollama model (`OLLAMA_URL` /
-`OLLAMA_URL_ALLOWLIST` are server-side) — no external calls.
-
-**Approval semantics differ per tier, by design:** the web tier splits
-*approve* (decision) from *publish* (write); a session is APPROVED, then a
-publisher ships it atomically. The Python tier's `/approve` *is* the write —
-it re-verifies file hashes and applies the patch to the docs working tree in
-the same call. Both require a human decision before anything is written.
+  Approval and publication are separate: an approved session is published only
+  after a human decision, and publishers re-check document versions before
+  writing.

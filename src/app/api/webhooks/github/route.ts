@@ -56,14 +56,14 @@ export const maxDuration = 60;
 /**
  * GitHub release-push and pull-request-merge webhooks.
  *
- * Contract parity with the FastAPI service (`app/api/webhooks.py`):
+ * GitHub webhook payload handling:
  *   - HMAC-SHA256 over the raw body, `sha256=` prefix, constant-time compare
  *   - 503 when GITHUB_WEBHOOK_SECRET is not configured (fail closed)
  *   - 401 on a bad signature
  *   - unsupported events, tag pushes, and branch deletions are acknowledged
  *     with `{ status: "ignored" }` instead of an error
  *
- * Differences from the Python service, by design of this unified app:
+ * The webhook path resolves its own GitHub compare diff before queuing:
  *   - the patch target lives in the database (documents table), so no
  *     SOURCE_REPO_PATH / DOCS_REPO_PATH path validation is needed
  *   - accepted work is stored in PostgreSQL and processed by the app worker

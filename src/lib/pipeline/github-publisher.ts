@@ -59,7 +59,9 @@ async function githubRequest<T>(
     throw new Error(`GitHub publishing request failed (${error instanceof Error ? error.name : "unknown"}).`);
   }
   if (!response.ok) {
-    throw new Error(`GitHub publishing request failed with status ${response.status}.`);
+    throw new Error(
+      `GitHub publishing request failed with status ${response.status} on ${init.method || "GET"} ${path} — verify the repository URL, file path, and fine-grained token repository access.`
+    );
   }
   return response.json() as Promise<T>;
 }
